@@ -472,6 +472,10 @@ static const char *guess_content_type(const char *filename) {
              MIME_ENTRY("bmp", "image/bmp"),
              MIME_ENTRY("bin", "application/octet-stream"),
              MIME_ENTRY("wasm", "application/wasm"),
+             MIME_ENTRY("manifest", "application/manifest+json"),
+             MIME_ENTRY("woff2", "application/font-woff"),
+             MIME_ENTRY("tiff", "image/tiff"),
+             MIME_ENTRY("webp", "image/webp"),
              {NULL, 0, NULL},
          };
 
@@ -768,16 +772,15 @@ static void listdir(struct mg_connection *c, struct mg_http_message *hm,
     off = c->send.len;  // Start of body
     mg_printf(c,
               "<!DOCTYPE html><html><head><title>Index of %.*s</title>%s%s"
-              "<style>th,td {text-align: left; padding-right: 1em; "
-              "font-family: monospace; }</style></head>"
-              "<body><h1>Index of %.*s</h1><table cellpadding=\"0\"><thead>"
+              "<style>%s</style></head>"
+              "<body><h1>Index of %.*s</h1><table><thead>"
               "<tr><th><a href=\"#\" rel=\"0\">Name</a></th><th>"
               "<a href=\"#\" rel=\"1\">Modified</a></th>"
               "<th><a href=\"#\" rel=\"2\">Size</a></th></tr>"
-              "<tr><td colspan=\"3\"><hr></td></tr>"
               "</thead>"
               "<tbody id=\"tb\">\n",
               (int) hm->uri.len, hm->uri.ptr, sort_js_code, sort_js_code2,
+              opts->directory_listing_css,
               (int) hm->uri.len, hm->uri.ptr);
 
     while ((dp = readdir(dirp)) != NULL) {
@@ -796,9 +799,9 @@ static void listdir(struct mg_connection *c, struct mg_http_message *hm,
     }
     closedir(dirp);
     mg_printf(c,
-              "</tbody><tfoot><tr><td colspan=\"3\"><hr></td></tr></tfoot>"
-              "</table><address>Mongoose v.%s</address></body></html>\n",
-              MG_VERSION);
+              "</tbody>"
+              "</table><address>%s</address></body></html>\n",
+              c->mgr->product_name);
     n = (size_t) snprintf(tmp, sizeof(tmp), "%lu",
                           (unsigned long) (c->send.len - off));
     if (n > sizeof(tmp)) n = 0;
@@ -861,7 +864,12 @@ void mg_http_serve_dir(struct mg_connection *c, struct mg_http_message *hm,
 #endif
       if (is_index && fp == NULL) {
 #if MG_ENABLE_DIRECTORY_LISTING
-        listdir(c, hm, opts, t2);
+        if (opts->enable_directory_listing == 1) {
+          listdir(c, hm, opts, t2);
+        }
+        else {
+          mg_http_reply(c, 403, "", "%s", "Directory listing forbidden");
+        }
 #else
         mg_http_reply(c, 403, "", "%s", "Directory listing not supported");
 #endif

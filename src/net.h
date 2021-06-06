@@ -27,6 +27,7 @@ struct mg_mgr {
 #if MG_ARCH == MG_ARCH_FREERTOS_TCP
   SocketSet_t ss;  // NOTE(lsm): referenced from socket struct
 #endif
+  const char *product_name;
 };
 
 struct mg_connection {

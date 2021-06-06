@@ -694,6 +694,7 @@ struct mg_mgr {
 #if MG_ARCH == MG_ARCH_FREERTOS_TCP
   SocketSet_t ss;  // NOTE(lsm): referenced from socket struct
 #endif
+  const char *product_name;
 };
 
 struct mg_connection {
@@ -769,6 +770,8 @@ struct mg_http_serve_opts {
   const char *root_dir;       // Web root directory, must be non-NULL
   const char *ssi_pattern;    // SSI file name pattern, e.g. #.shtml
   const char *extra_headers;  // Extra HTTP headers to add in responses
+  int enable_directory_listing;  //Enabled directory listing
+  const char *directory_listing_css; //css code for directory listing
 };
 
 // Parameter for mg_http_next_multipart
@@ -854,6 +857,7 @@ size_t mg_ws_send(struct mg_connection *, const char *buf, size_t len, int op);
 
 
 
+<<<<<<< HEAD
 struct mg_connection *mg_sntp_connect(struct mg_mgr *mgr, const char *url,
                                       mg_event_handler_t fn, void *fn_data);
 void mg_sntp_send(struct mg_connection *c, unsigned long utc);
@@ -920,10 +924,6 @@ size_t mg_mqtt_next_unsub(struct mg_mqtt_message *msg, struct mg_str *topic,
 void mg_mqtt_ping(struct mg_connection *);
 void mg_mqtt_pong(struct mg_connection *);
 void mg_mqtt_disconnect(struct mg_connection *);
-
-
-
-
 
 // Mongoose sends DNS queries that contain only one question:
 // either A (IPv4) or AAAA (IPv6) address lookup.

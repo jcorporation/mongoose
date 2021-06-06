@@ -23,6 +23,17 @@ robust, and easy. Features include:
 - Very easy to integrate: just copy `mongoose.c` and `mongoose.h` files to your build tree
 - Detailed [documentation](https://cesanta.com/docs/)
 
+# This fork
+
+This is a fork of mongoose 7 to provide some additional features that will not be implemented in the upstream version.
+Further additional functions for mongoose are implemented in myMPD.
+
+Additional features:
+
+- Enable and disable directory listing through mg_http_serve_opts
+- Set css for directory listing
+- Set product name in mgr struct
+- Additional mime types
 
 # Commercial use
 - Mongoose is used by hundreds of businesses, from Fortune500 giants like

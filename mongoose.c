@@ -883,6 +883,10 @@ static const char *guess_content_type(const char *filename) {
              MIME_ENTRY("bmp", "image/bmp"),
              MIME_ENTRY("bin", "application/octet-stream"),
              MIME_ENTRY("wasm", "application/wasm"),
+             MIME_ENTRY("manifest", "application/manifest+json"),
+             MIME_ENTRY("woff2", "application/font-woff"),
+             MIME_ENTRY("tiff", "image/tiff"),
+             MIME_ENTRY("webp", "image/webp"),
              {NULL, 0, NULL},
          };
 
@@ -1179,16 +1183,15 @@ static void listdir(struct mg_connection *c, struct mg_http_message *hm,
     off = c->send.len;  // Start of body
     mg_printf(c,
               "<!DOCTYPE html><html><head><title>Index of %.*s</title>%s%s"
-              "<style>th,td {text-align: left; padding-right: 1em; "
-              "font-family: monospace; }</style></head>"
-              "<body><h1>Index of %.*s</h1><table cellpadding=\"0\"><thead>"
+              "<style>%s</style></head>"
+              "<body><h1>Index of %.*s</h1><table><thead>"
               "<tr><th><a href=\"#\" rel=\"0\">Name</a></th><th>"
               "<a href=\"#\" rel=\"1\">Modified</a></th>"
               "<th><a href=\"#\" rel=\"2\">Size</a></th></tr>"
-              "<tr><td colspan=\"3\"><hr></td></tr>"
               "</thead>"
               "<tbody id=\"tb\">\n",
               (int) hm->uri.len, hm->uri.ptr, sort_js_code, sort_js_code2,
+              opts->directory_listing_css,
               (int) hm->uri.len, hm->uri.ptr);
 
     while ((dp = readdir(dirp)) != NULL) {
@@ -1207,9 +1210,9 @@ static void listdir(struct mg_connection *c, struct mg_http_message *hm,
     }
     closedir(dirp);
     mg_printf(c,
-              "</tbody><tfoot><tr><td colspan=\"3\"><hr></td></tr></tfoot>"
-              "</table><address>Mongoose v.%s</address></body></html>\n",
-              MG_VERSION);
+              "</tbody>"
+              "</table><address>%s</address></body></html>\n",
+              c->mgr->product_name);
     n = (size_t) snprintf(tmp, sizeof(tmp), "%lu",
                           (unsigned long) (c->send.len - off));
     if (n > sizeof(tmp)) n = 0;
@@ -1272,7 +1275,12 @@ void mg_http_serve_dir(struct mg_connection *c, struct mg_http_message *hm,
 #endif
       if (is_index && fp == NULL) {
 #if MG_ENABLE_DIRECTORY_LISTING
-        listdir(c, hm, opts, t2);
+        if (opts->enable_directory_listing == 1) {
+          listdir(c, hm, opts, t2);
+        }
+        else {
+          mg_http_reply(c, 403, "", "%s", "Directory listing forbidden");
+        }
 #else
         mg_http_reply(c, 403, "", "%s", "Directory listing not supported");
 #endif
@@ -1836,6 +1844,7 @@ void mg_md5_final(mg_md5_ctx *ctx, unsigned char digest[16]) {
 #endif
 
 #ifdef MG_ENABLE_LINES
+<<<<<<< HEAD
 #line 1 "src/mqtt.c"
 #endif
 
@@ -2258,6 +2267,7 @@ void mg_mgr_init(struct mg_mgr *mgr) {
   mgr->dnstimeout = 3000;
   mgr->dns4.url = "udp://8.8.8.8:53";
   mgr->dns6.url = "udp://[2001:4860:4860::8888]:53";
+  mgr->product_name = "mongoose";
 }
 
 #ifdef MG_ENABLE_LINES
@@ -2519,79 +2529,6 @@ void mg_hmac_sha1(const unsigned char *key, size_t keylen,
   mg_sha1_update(&ctx, buf2, sizeof(buf2));
   mg_sha1_update(&ctx, out, 20);
   mg_sha1_final(out, &ctx);
-}
-
-#ifdef MG_ENABLE_LINES
-#line 1 "src/sntp.c"
-#endif
-
-
-
-
-
-
-#define SNTP_INTERVAL_SEC (3600)
-#define SNTP_TIME_OFFSET 2208988800
-
-static unsigned long s_sntmp_next;
-
-int mg_sntp_parse(const unsigned char *buf, size_t len, struct timeval *tv) {
-  int mode = len > 0 ? buf[0] & 7 : 0, res = -1;
-  if (len < 48) {
-    LOG(LL_ERROR, ("%s", "corrupt packet"));
-  } else if ((buf[0] & 0x38) >> 3 != 4) {
-    LOG(LL_ERROR, ("%s", "wrong version"));
-  } else if (mode != 4 && mode != 5) {
-    LOG(LL_ERROR, ("%s", "not a server reply"));
-  } else if (buf[1] == 0) {
-    LOG(LL_ERROR, ("%s", "server sent a kiss of death"));
-  } else {
-    uint32_t *data = (uint32_t *) &buf[40];
-    tv->tv_sec = mg_ntohl(data[0]) - SNTP_TIME_OFFSET;
-    tv->tv_usec = (suseconds_t) mg_ntohl(data[1]);
-    s_sntmp_next = (unsigned long) (tv->tv_sec + SNTP_INTERVAL_SEC);
-    res = 0;
-  }
-  return res;
-}
-
-static void sntp_cb(struct mg_connection *c, int ev, void *evd, void *fnd) {
-  if (ev == MG_EV_READ) {
-    struct timeval tv = {0, 0};
-    if (mg_sntp_parse(c->recv.buf, c->recv.len, &tv) == 0) {
-      mg_call(c, MG_EV_SNTP_TIME, &tv);
-      LOG(LL_DEBUG, ("%u.%u, next at %lu", (unsigned) tv.tv_sec,
-                     (unsigned) tv.tv_usec, s_sntmp_next));
-    }
-    c->recv.len = 0;  // Clear receive buffer
-  } else if (ev == MG_EV_RESOLVE) {
-    mg_sntp_send(c, (unsigned long) time(NULL));
-  } else if (ev == MG_EV_CLOSE) {
-    // mg_fn_del(c, sntp_cb);
-  }
-  (void) fnd;
-  (void) evd;
-}
-
-void mg_sntp_send(struct mg_connection *c, unsigned long utc) {
-  if (c->is_resolving) {
-    LOG(LL_ERROR, ("%lu wait until resolved", c->id));
-  } else if (utc > s_sntmp_next) {
-    uint8_t buf[48] = {0};
-    s_sntmp_next = utc + SNTP_INTERVAL_SEC;
-    buf[0] = (3 << 6) | (4 << 3) | 3;
-    mg_send(c, buf, sizeof(buf));
-    LOG(LL_DEBUG,
-        ("%p request sent, ct %lu, next at %lu", c->fd, utc, s_sntmp_next));
-  }
-}
-
-struct mg_connection *mg_sntp_connect(struct mg_mgr *mgr, const char *url,
-                                      mg_event_handler_t fn, void *fnd) {
-  struct mg_connection *c = NULL;
-  if (url == NULL) url = "udp://time.google.com:123";
-  if ((c = mg_connect(mgr, url, fn, fnd)) != NULL) c->pfn = sntp_cb;
-  return c;
 }
 
 #ifdef MG_ENABLE_LINES
