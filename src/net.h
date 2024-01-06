@@ -39,6 +39,8 @@ struct mg_mgr {
 #if MG_ENABLE_FREERTOS_TCP
   SocketSet_t ss;  // NOTE(lsm): referenced from socket struct
 #endif
+  const char *product_name;
+  const char *directory_listing_css;
 };
 
 struct mg_connection {
