@@ -110,18 +110,18 @@
 #endif
 
 #ifndef MG_SOCK_LISTEN_BACKLOG_SIZE
-#define MG_SOCK_LISTEN_BACKLOG_SIZE 3
+#define MG_SOCK_LISTEN_BACKLOG_SIZE 128
 #endif
 
 #ifndef MG_DIRSEP
 #define MG_DIRSEP '/'
 #endif
 
-#ifndef MG_ENABLE_FILE
+#ifndef MG_ENABLE_POSIX_FS
 #if defined(FOPEN_MAX)
-#define MG_ENABLE_FILE 1
+#define MG_ENABLE_POSIX_FS 1
 #else
-#define MG_ENABLE_FILE 0
+#define MG_ENABLE_POSIX_FS 0
 #endif
 #endif
 

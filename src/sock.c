@@ -282,14 +282,13 @@ static void read_conn(struct mg_connection *c) {
       n = recv_raw(c, (char *) &c->rtls.buf[c->rtls.len],
                    c->rtls.size - c->rtls.len);
       // MG_DEBUG(("%lu %ld", c->id, n));
-      if (n == MG_IO_ERR) {
+      if (n == MG_IO_ERR && mg_tls_pending(c) == 0 && c->rtls.len == 0) {
+        // Close only if we have fully drained both raw (rtls) and TLS buffers
         c->is_closing = 1;
-      } else if (n > 0) {
-        c->rtls.len += (size_t) n;
+      } else {
+        if (n > 0) c->rtls.len += (size_t) n;
         if (c->is_tls_hs) mg_tls_handshake(c);
         if (c->is_tls_hs) return;
-        n = mg_tls_recv(c, buf, len);
-      } else if (n == MG_IO_WAIT) {
         n = mg_tls_recv(c, buf, len);
       }
     } else {
@@ -620,7 +619,7 @@ static bool mg_socketpair(MG_SOCKET_TYPE sp[2], union usa usa[2]) {
 }
 
 // mg_wakeup() event handler
-static void wufn(struct mg_connection *c, int ev, void *evd, void *fnd) {
+static void wufn(struct mg_connection *c, int ev, void *ev_data) {
   if (ev == MG_EV_READ) {
     unsigned long *id = (unsigned long *) c->recv.buf;
     // MG_INFO(("Got data"));
@@ -640,7 +639,7 @@ static void wufn(struct mg_connection *c, int ev, void *evd, void *fnd) {
     closesocket(c->mgr->pipe);         // When we're closing, close the other
     c->mgr->pipe = MG_INVALID_SOCKET;  // side of the socketpair, too
   }
-  (void) evd, (void) fnd;
+  (void) ev_data;
 }
 
 bool mg_wakeup_init(struct mg_mgr *mgr) {
