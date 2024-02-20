@@ -10271,6 +10271,15 @@ void mg_tls_ctx_free(struct mg_mgr *mgr) {
 
 
 #if MG_TLS == MG_TLS_OPENSSL
+
+static void cb(const SSL *ssl, const char *line) {
+    FILE *fp;
+    fp = fopen("keylog.txt", "a");
+    if (fp == NULL) MG_ERROR(("Failed to create log file"));
+    fprintf(fp, "%s\n", line);
+    fclose(fp);
+}
+
 static int tls_err_cb(const char *s, size_t len, void *c) {
   int n = (int) len - 1;
   MG_ERROR(("%lu %.*s", ((struct mg_connection *) c)->id, n, s));
@@ -10374,7 +10383,7 @@ void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
 
   if (!s_initialised) {
     SSL_library_init();
-    s_initialised++;
+    //s_initialised++;
   }
   MG_DEBUG(("%lu Setting TLS", c->id));
   tls->ctx = c->is_client ? SSL_CTX_new(SSLv23_client_method())
@@ -10385,6 +10394,10 @@ void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
   }
   SSL_set_session_id_context(tls->ssl, (const uint8_t *) id,
                              (unsigned) strlen(id));
+  SSL_CTX_set_keylog_callback(tls->ctx, cb);
+  if (!s_initialised) {                 // <-- ADD AND CLAIM "initialised" HERE
+    s_initialised++;
+  }
   // Disable deprecated protocols
   SSL_set_options(tls->ssl, SSL_OP_NO_SSLv2);
   SSL_set_options(tls->ssl, SSL_OP_NO_SSLv3);

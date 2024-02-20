@@ -57,6 +57,7 @@ static const char *s_tls_key =
 // We use the same event handler function for HTTP and HTTPS connections
 // fn_data is NULL for plain HTTP, and non-NULL for HTTPS
 static void fn(struct mg_connection *c, int ev, void *ev_data) {
+  if (ev == MG_EV_OPEN) { c->is_hexdumping = 1; }
   if (ev == MG_EV_ACCEPT && c->fn_data != NULL) {
     struct mg_tls_opts opts = {
 #ifdef TLS_TWOWAY
