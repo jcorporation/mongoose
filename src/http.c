@@ -722,26 +722,24 @@ static void listdir(struct mg_connection *c, struct mg_http_message *hm,
   off = c->send.len;  // Start of body
   mg_printf(c,
             "<!DOCTYPE html><html><head><title>Index of %.*s</title>%s%s"
-            "<style>th,td {text-align: left; padding-right: 1em; "
-            "font-family: monospace; }</style></head>"
+            "<style>%s</style></head>"
             "<body><h1>Index of %.*s</h1><table cellpadding=\"0\"><thead>"
             "<tr><th><a href=\"#\" rel=\"0\">Name</a></th><th>"
             "<a href=\"#\" rel=\"1\">Modified</a></th>"
             "<th><a href=\"#\" rel=\"2\">Size</a></th></tr>"
-            "<tr><td colspan=\"3\"><hr></td></tr>"
             "</thead>"
             "<tbody id=\"tb\">\n",
-            (int) uri.len, uri.ptr, sort_js_code, sort_js_code2, (int) uri.len,
-            uri.ptr);
+            (int) uri.len, uri.ptr, sort_js_code, sort_js_code2,
+            c->mgr->directory_listing_css, (int) uri.len, uri.ptr);
   mg_printf(c, "%s",
             "  <tr><td><a href=\"..\">..</a></td>"
             "<td name=-1></td><td name=-1>[DIR]</td></tr>\n");
 
   fs->ls(dir, printdirentry, &d);
   mg_printf(c,
-            "</tbody><tfoot><tr><td colspan=\"3\"><hr></td></tr></tfoot>"
-            "</table><address>Mongoose v.%s</address></body></html>\n",
-            MG_VERSION);
+            "</tbody>"
+            "</table><address>%s</address></body></html>\n",
+            c->mgr->product_name);
   n = mg_snprintf(tmp, sizeof(tmp), "%lu", (unsigned long) (c->send.len - off));
   if (n > sizeof(tmp)) n = 0;
   memcpy(c->send.buf + off - 12, tmp, n);  // Set content length
