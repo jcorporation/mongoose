@@ -571,8 +571,8 @@ void mg_http_serve_file(struct mg_connection *c, struct mg_http_message *hm,
   // Failed to open, and page404 is configured? Open it, then
   if (fd == NULL && opts->page404 != NULL) {
     fd = mg_fs_open(fs, opts->page404, MG_FS_READ);
-    mime = guess_content_type(mg_str(path), opts->mime_types);
     path = opts->page404;
+    mime = guess_content_type(mg_str(path), opts->mime_types);
   }
 
   if (fd == NULL || fs->st(path, &size, &mtime) == 0) {
@@ -919,7 +919,7 @@ bool mg_http_match_uri(const struct mg_http_message *hm, const char *glob) {
 
 long mg_http_upload(struct mg_connection *c, struct mg_http_message *hm,
                     struct mg_fs *fs, const char *dir, size_t max_size) {
-  char buf[20] = "0", file[40], path[MG_PATH_MAX];
+  char buf[20] = "0", file[MG_PATH_MAX], path[MG_PATH_MAX];
   long res = 0, offset;
   mg_http_get_var(&hm->query, "offset", buf, sizeof(buf));
   mg_http_get_var(&hm->query, "file", file, sizeof(file));
@@ -989,7 +989,6 @@ static void http_cb(struct mg_connection *c, int ev, void *ev_data) {
   if (ev == MG_EV_READ || ev == MG_EV_CLOSE) {
     struct mg_http_message hm;
     size_t ofs = 0;  // Parsing offset
-
     while (c->is_resp == 0 && ofs < c->recv.len) {
       const char *buf = (char *) c->recv.buf + ofs;
       int n = mg_http_parse(buf, c->recv.len - ofs, &hm);
@@ -1004,8 +1003,9 @@ static void http_cb(struct mg_connection *c, int ev, void *ev_data) {
         c->recv.len = 0;
         return;
       }
-      if (n == 0) break;        // Request is not buffered yet
-      if (ev == MG_EV_CLOSE) {  // If client did not set Content-Length
+      if (n == 0) break;                 // Request is not buffered yet
+      mg_call(c, MG_EV_HTTP_HDRS, &hm);  // Got all HTTP headers
+      if (ev == MG_EV_CLOSE) {           // If client did not set Content-Length
         hm.message.len = c->recv.len - ofs;  // and closes now, deliver MSG
         hm.body.len = hm.message.len - (size_t) (hm.body.ptr - hm.message.ptr);
       }
@@ -1015,6 +1015,27 @@ static void http_cb(struct mg_connection *c, int ev, void *ev_data) {
         } else {
           mg_error(c, "Invalid Transfer-Encoding");  // See #2460
           return;
+        }
+      } else if (mg_http_get_header(&hm, "Content-length") == NULL) {
+        // #2593: HTTP packets must contain either Transfer-Encoding or
+        // Content-length
+        bool is_response = mg_ncasecmp(hm.method.ptr, "HTTP/", 5) == 0;
+        bool require_content_len = false;
+        if (!is_response && (mg_vcasecmp(&hm.method, "POST") == 0 ||
+                             mg_vcasecmp(&hm.method, "PUT") == 0)) {
+          // POST and PUT should include an entity body. Therefore, they should
+          // contain a Content-length header. Other requests can also contain a
+          // body, but their content has no defined semantics (RFC 7231)
+          require_content_len = true;
+        } else if (is_response) {
+          // HTTP spec 7.2 Entity body: All other responses must include a body
+          // or Content-Length header field defined with a value of 0.
+          int status = mg_http_status(&hm);
+          require_content_len = status >= 200 && status != 204 && status != 304;
+        }
+        if (require_content_len) {
+          mg_http_reply(c, 411, "", "");
+          MG_ERROR(("%s", "Content length missing from request"));
         }
       }
 
