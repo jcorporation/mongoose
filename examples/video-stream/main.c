@@ -9,7 +9,7 @@
 static void cb(struct mg_connection *c, int ev, void *ev_data) {
   if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-    if (mg_http_match_uri(hm, "/api/video1")) {
+    if (mg_match(hm->uri, mg_str("/api/video1"), NULL)) {
       c->data[0] = 'S';  // Mark that connection as live streamer
       mg_printf(
           c, "%s",
@@ -36,15 +36,15 @@ static void broadcast_mjpeg_frame(struct mg_mgr *mgr) {
   struct mg_connection *c;
   for (c = mgr->conns; c != NULL; c = c->next) {
     if (c->data[0] != 'S') continue;  // Skip non-stream connections
-    if (data.ptr == NULL) continue;   // Skip on file read error
+    if (data.buf == NULL) continue;   // Skip on file read error
     mg_printf(c,
               "--foo\r\nContent-Type: image/jpeg\r\n"
               "Content-Length: %lu\r\n\r\n",
               data.len);
-    mg_send(c, data.ptr, data.len);
+    mg_send(c, data.buf, data.len);
     mg_send(c, "\r\n", 2);
   }
-  free((void *) data.ptr);
+  free((void *) data.buf);
 }
 
 static void timer_callback(void *arg) {

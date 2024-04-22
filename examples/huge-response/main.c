@@ -44,11 +44,11 @@ static size_t printdata(mg_pfn_t out, void *ptr, va_list *ap) {
 static void fn(struct mg_connection *c, int ev, void *ev_data) {
   if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = ev_data;
-    if (mg_http_match_uri(hm, "/api/data")) {
+    if (mg_match(hm->uri, mg_str("/api/data"), NULL)) {
       const char *headers = "content-type: text/json\r\n";
       long start = getparam(hm, "$.start");
       long version = getparam(hm, "$.version");
-      MG_DEBUG(("%.*s", (int) hm->body.len, hm->body.ptr));
+      MG_DEBUG(("%.*s", (int) hm->body.len, hm->body.buf));
       if (version > 0 && version != s_version) {
         // Version mismatch: s_data has changed while client fetches it
         // Tell client to restart

@@ -138,7 +138,7 @@ static struct mg_connection *start_modbus_request(struct mg_mgr *mgr,
   uint16_t reg = (uint16_t) mg_json_get_long(json, "$.reg", 1);
   uint8_t func = (uint8_t) mg_json_get_long(json, "$.func", 0);
   uint16_t nregs = (uint16_t) mg_json_get_long(json, "$.nregs", 1);
-  MG_INFO(("%lu REQUEST: %.*s", cid, json.len, json.ptr));
+  MG_INFO(("%lu REQUEST: %.*s", cid, json.len, json.buf));
   if (func == 0) {
     MG_ERROR(("Set func to a valid modbus function code"));
   } else if ((c = mg_connect(mgr, url, mfn, NULL)) == NULL) {
@@ -253,15 +253,15 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
   } else if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
 
-    if (mg_http_match_uri(hm, "/api/settings/get")) {
+    if (mg_match(hm->uri, mg_str("/api/settings/get"), NULL)) {
       handle_settings_get(c);
-    } else if (mg_http_match_uri(hm, "/api/settings/set")) {
+    } else if (mg_match(hm->uri, mg_str("/api/settings/set"), NULL)) {
       handle_settings_set(c, hm->body);
-    } else if (mg_http_match_uri(hm, "/api/settings/set")) {
+    } else if (mg_match(hm->uri, mg_str("/api/settings/set"), NULL)) {
       handle_settings_set(c, hm->body);
-    } else if (mg_http_match_uri(hm, "/api/modbus/exec")) {
+    } else if (mg_match(hm->uri, mg_str("/api/modbus/exec"), NULL)) {
       handle_modbus_exec(c, hm->body);
-    } else if (mg_http_match_uri(hm, "/api/device/reset")) {
+    } else if (mg_match(hm->uri, mg_str("/api/device/reset"), NULL)) {
       mg_timer_add(c->mgr, 500, 0, (void (*)(void *)) mg_device_reset, NULL);
       mg_http_reply(c, 200, s_json_header, "true\n");
     } else {
@@ -275,8 +275,8 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
 #endif
       mg_http_serve_dir(c, ev_data, &opts);
     }
-    MG_DEBUG(("%lu %.*s %.*s", c->id, (int) hm->method.len, hm->method.ptr,
-              (int) hm->uri.len, hm->uri.ptr));
+    MG_DEBUG(("%lu %.*s %.*s", c->id, (int) hm->method.len, hm->method.buf,
+              (int) hm->uri.len, hm->uri.buf));
   } else if (ev == MG_EV_POLL) {
     if (cd->expiration_time > 0 && cd->expiration_time < mg_millis()) {
       cd->expiration_time = 0;
