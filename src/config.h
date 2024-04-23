@@ -157,3 +157,27 @@
 #ifndef MG_ENABLE_PROFILE
 #define MG_ENABLE_PROFILE 0
 #endif
+
+#ifndef MG_ENABLE_TCPIP_DRIVER_INIT    // mg_mgr_init() will also initialize
+#define MG_ENABLE_TCPIP_DRIVER_INIT 1  // enabled built-in driver for
+#endif                                 // Mongoose built-in network stack
+
+#ifndef MG_TCPIP_IP                      // e.g. MG_IPV4(192, 168, 0, 223)
+#define MG_TCPIP_IP MG_IPV4(0, 0, 0, 0)  // Default is 0.0.0.0 (DHCP)
+#endif
+
+#ifndef MG_TCPIP_MASK
+#define MG_TCPIP_MASK MG_IPV4(0, 0, 0, 0)  // Default is 0.0.0.0 (DHCP)
+#endif
+
+#ifndef MG_TCPIP_GW
+#define MG_TCPIP_GW MG_IPV4(0, 0, 0, 0)  // Default is 0.0.0.0 (DHCP)
+#endif
+
+#ifndef MG_SET_MAC_ADDRESS
+#define MG_SET_MAC_ADDRESS(mac)
+#endif
+
+#ifndef MG_ENABLE_TCPIP_PRINT_DEBUG_STATS
+#define MG_ENABLE_TCPIP_PRINT_DEBUG_STATS 0
+#endif

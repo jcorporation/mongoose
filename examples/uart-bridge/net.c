@@ -26,6 +26,7 @@ struct state {
 void uart_init(int tx, int rx, int baud);
 int uart_read(void *buf, size_t len);
 void uart_write(const void *buf, size_t len);
+struct mg_str config_read(void);
 void config_write(struct mg_str config);
 
 // Let users define their own UART API. If they don't, use a dummy one
@@ -53,8 +54,12 @@ int uart_read(void *buf, size_t len) {
 #endif
 }
 
+struct mg_str config_read(void) {
+  return mg_file_read(&mg_fs_posix, "config.json");
+}
+
 void config_write(struct mg_str config) {
-  mg_file_write(&mg_fs_posix, "config.json", config.ptr, config.len);
+  mg_file_write(&mg_fs_posix, "config.json", config.buf, config.len);
 }
 #endif
 
@@ -67,7 +72,7 @@ static void ws_fn(struct mg_connection *c, int ev, void *ev_data) {
     c->data[0] = 'W';  // When WS handhake is done, mark us as WS client
   } else if (ev == MG_EV_WS_MSG) {
     struct mg_ws_message *wm = (struct mg_ws_message *) ev_data;
-    uart_write(wm->data.ptr, wm->data.len);  // Send to UART
+    uart_write(wm->data.buf, wm->data.len);  // Send to UART
     c->recv.len = 0;                         // Discard received data
   } else if (ev == MG_EV_CLOSE) {
     if (c->is_listening) s_state.websocket.c = NULL;
@@ -92,7 +97,7 @@ static void tcp_fn(struct mg_connection *c, int ev, void *ev_data) {
 static struct mg_str mqtt_topic(const char *name, const char *dflt) {
   struct mg_str qs = mg_str(strchr(s_state.mqtt.url, '?'));
   struct mg_str v = mg_http_var(qs, mg_str(name));
-  return v.ptr == NULL ? mg_str(dflt) : v;
+  return v.buf == NULL ? mg_str(dflt) : v;
 }
 
 // Event handler for MQTT connection
@@ -108,7 +113,7 @@ static void mq_fn(struct mg_connection *c, int ev, void *ev_data) {
     mg_mqtt_sub(c, &sub_opts);  // Subscribe to RX topic
   } else if (ev == MG_EV_MQTT_MSG) {
     struct mg_mqtt_message *mm = ev_data;    // MQTT message
-    uart_write(mm->data.ptr, mm->data.len);  // Send to UART
+    uart_write(mm->data.buf, mm->data.len);  // Send to UART
   } else if (ev == MG_EV_CLOSE) {
     s_state.mqtt.c = NULL;
   }
@@ -158,7 +163,7 @@ static void update_string(struct mg_str json, const char *path, char **value) {
 }
 
 static void config_apply(struct mg_str s) {
-  MG_INFO(("Applying config: %.*s", (int) s.len, s.ptr));
+  MG_INFO(("Applying config: %.*s", (int) s.len, s.buf));
 
   bool b;
   if (mg_json_get_bool(s, "$.tcp.enable", &b)) s_state.tcp.enable = b;
@@ -183,8 +188,8 @@ static void config_apply(struct mg_str s) {
 void uart_bridge_fn(struct mg_connection *c, int ev, void *ev_data) {
   if (ev == MG_EV_OPEN && c->is_listening) {
     struct mg_str config = mg_file_read(&mg_fs_posix, "config.json");
-    if (config.ptr != NULL) config_apply(config);
-    free((char *) config.ptr);
+    if (config.buf != NULL) config_apply(config);
+    free(config.buf);
     s_state.tcp.url = strdup(DEFAULT_TCP);
     s_state.websocket.url = strdup(DEFAULT_WEBSOCKET);
     s_state.mqtt.url = strdup(DEFAULT_MQTT);
@@ -193,13 +198,13 @@ void uart_bridge_fn(struct mg_connection *c, int ev, void *ev_data) {
     // mg_log_set(MG_LL_DEBUG);                  // Set log level
   } else if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-    if (mg_http_match_uri(hm, "/api/hi")) {
+    if (mg_match(hm->uri, mg_str("/api/hi"), NULL)) {
       mg_http_reply(c, 200, "", "hi\n");  // Testing endpoint
-    } else if (mg_http_match_uri(hm, "/api/config/set")) {
+    } else if (mg_match(hm->uri, mg_str("/api/config/set"), NULL)) {
       config_apply(hm->body);
       config_write(hm->body);
       mg_http_reply(c, 200, "", "true\n");
-    } else if (mg_http_match_uri(hm, "/api/config/get")) {
+    } else if (mg_match(hm->uri, mg_str("/api/config/get"), NULL)) {
       mg_http_reply(c, 200, "Content-Type: application/json\r\n",
                     "{%m:{%m:%m,%m:%s},%m:{%m:%m,%m:%s},%m:{%m:%m,%m:%s},"
                     "%m:%d,%m:%d,%m:%d}\n",

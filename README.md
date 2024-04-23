@@ -1,15 +1,14 @@
-# Mongoose - Embedded Web Server / Embedded Networking Library
+# Mongoose - Embedded Web Server / Embedded Network Library
 
 [![License: GPLv2/Commercial](https://img.shields.io/badge/License-GPLv2%20or%20Commercial-green.svg)](https://opensource.org/licenses/gpl-2.0.php)
 [![Build Status]( https://github.com/cesanta/mongoose/workflows/build/badge.svg)](https://github.com/cesanta/mongoose/actions)
 [![Code Coverage](https://codecov.io/gh/cesanta/mongoose/branch/master/graph/badge.svg)](https://codecov.io/gh/cesanta/mongoose)
 [![Fuzzing Status](https://oss-fuzz-build-logs.storage.googleapis.com/badges/mongoose.svg)](https://bugs.chromium.org/p/oss-fuzz/issues/list?sort=-opened&can=1&q=proj:mongoose)
 
-Mongoose is a network library for C/C++. 
-It implements event-driven
-non-blocking APIs for TCP, UDP, HTTP, WebSocket, MQTT.  It is designed for
-connecting devices and bringing them online. On the market since 2004, used by
-vast number of open source and commercial products - it even runs on the
+Mongoose is a network library for C/C++.  It provides event-driven non-blocking
+APIs for TCP, UDP, HTTP, WebSocket, MQTT, and other protocols.  It is designed
+for connecting devices and bringing them online. On the market since 2004, used
+by vast number of open source and commercial products - it even runs on the
 International Space Station!  Mongoose makes embedded network programming fast,
 robust, and easy. Features include:
 
@@ -18,55 +17,56 @@ robust, and easy. Features include:
   - works on STM32, NXP, ESP32, NRF52, TI, Microchip, and other
   - write code once - and it'll work everywhere
   - ideal for the unification of the network infrastructure code across company
-- Built-in protocols: plain TCP/UDP, SNTP, HTTP, MQTT, Websocket
-- SSL/TLS support for mbedTLS and OpenSSL
+- Built-in protocols: plain TCP/UDP, SNTP, HTTP, MQTT, Websocket, and other
 - Asynchronous DNS resolver
 - Tiny static and run-time footprint
 - Source code is both ISO C and ISO C++ compliant
-- Very easy to integrate: just copy `mongoose.c` and `mongoose.h` files to your source tree. See
-  [exact steps](https://mongoose.ws/documentation/#2-minute-integration-guide)
-- Works in any environment with socket API, like LwIP, Zephyr, Azure
+- Easy to integrate: just copy `mongoose.c` and `mongoose.h` files to your source tree
 - Built-in TCP/IP stack with drivers for bare metal or RTOS systems
    - Available drivers: STM32F, STM32H; NXP RT1xxx; TI TM4C; Microchip SAME54; Wiznet W5500
-   - A complete Web device dashboard on bare metal
-  [Nucleo-F429ZI](examples/stm32/nucleo-f429zi-baremetal) is only 6 files
+   - A complete Web device dashboard on bare metal ST Nucleo boards is only 6 files
    - For comparison, a CubeIDE generated HTTP example is 400+ files
-- Built-in TLS 1.3 server-side support
+- Can run on top of an existing TCP/IP stack with BSD API, e.g. lwIP, Zephyr, Azure, etc
+- Built-in TLS 1.3 ECC stack. Also can use external TLS libraries - mbedTLS, OpenSSL, or other
 - Does not depend on any other software to implement networking
-- Built-in firmware updates for STM32H5, STM32H7, and more coming
-- Detailed [user guide, API reference and tons of tutorials](https://mongoose.ws/documentation/)
+- Built-in firmware updates for STM32 H5, STM32 H7
 
-## Usage
+See https://mongoose.ws/ for complete documentation, videos, case studies, etc.
+
+## Usage Examples
+
+Below are quick snippets that should give an idea how simple the API is and
+how easy it is to create applications with it.
 
 Create a simple web server that serves a directory. The behavior of the
 HTTP server is specified by its event handler function:
 
 ```c
-#include "mongoose.h"
-
-int main(void) {
-  struct mg_mgr mgr;  // Declare event manager
-  mg_mgr_init(&mgr);  // Initialise event manager
-  mg_http_listen(&mgr, "http://0.0.0.0:8000", fn, NULL);  // Setup listener
-  for (;;) {
-    mg_mgr_poll(&mgr, 1000);  // Run an infinite event loop
-  }
-  return 0;
-}
+#include "mongoose.h"   // To build, run: cc main.c mongoose.c
 
 // HTTP server event handler function
-void fn(struct mg_connection *c, int ev, void *ev_data) {
+void ev_handler(struct mg_connection *c, int ev, void *ev_data) {
   if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
     struct mg_http_serve_opts opts = { .root_dir = "./web_root/" };
     mg_http_serve_dir(c, hm, &opts);
   }
 }
+
+int main(void) {
+  struct mg_mgr mgr;  // Declare event manager
+  mg_mgr_init(&mgr);  // Initialise event manager
+  mg_http_listen(&mgr, "http://0.0.0.0:8000", ev_handler, NULL);  // Setup listener
+  for (;;) {          // Run an infinite event loop
+    mg_mgr_poll(&mgr, 1000);
+  }
+  return 0;
+}
 ```
 
 HTTP server implements a REST API that returns current time. JSON formatting:
 ```c
-static void fn(struct mg_connection *c, int ev, void *ev_data) {
+static void ev_handler(struct mg_connection *c, int ev, void *ev_data) {
   if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
     if (mg_http_match_uri(hm, "/api/time/get")) {
@@ -81,7 +81,7 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
 MQTT client that subscribes to a topic `aa/bb` and prints all incoming messages:
 
 ```c
-static void fn(struct mg_connection *c, int ev, void *ev_data) {
+static void ev_handler(struct mg_connection *c, int ev, void *ev_data) {
   if (ev == MG_EV_MQTT_OPEN) {
     struct mg_mqtt_opts opts = {.qos = 1, .topic = mg_str("aa/bb")};
     mg_mqtt_sub(c, &opts);

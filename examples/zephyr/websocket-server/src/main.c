@@ -21,19 +21,19 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
     mg_tls_init(c, &opts);
   } else if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-    if (mg_http_match_uri(hm, "/websocket")) {
+    if (mg_match(hm->uri, mg_str("/websocket"), NULL)) {
       // Upgrade to websocket. From now on, a connection is a full-duplex
       // Websocket connection, which will receive MG_EV_WS_MSG events.
       mg_ws_upgrade(c, hm, NULL);
-    } else if (mg_http_match_uri(hm, "/rest")) {
+    } else if (mg_match(hm->uri, mg_str("/rest"), NULL)) {
       // Serve REST response
       mg_http_reply(c, 200, "", "{\"result\": %d}\n", 123);
     }
   } else if (ev == MG_EV_WS_MSG) {
     // Got websocket frame. Received data is wm->data. Echo it back!
     struct mg_ws_message *wm = (struct mg_ws_message *) ev_data;
-    MG_INFO(("Got wm: %p, data: %p, %d = %*.s", wm, wm->data.ptr, wm->data.len, wm->data.len, wm->data.ptr));
-    mg_ws_send(c, wm->data.ptr, wm->data.len, WEBSOCKET_OP_TEXT);
+    MG_INFO(("Got wm: %p, data: %p, %d = %*.s", wm, wm->data.buf, wm->data.len, wm->data.len, wm->data.buf));
+    mg_ws_send(c, wm->data.buf, wm->data.len, WEBSOCKET_OP_TEXT);
   }
 }
 
