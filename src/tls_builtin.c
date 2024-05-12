@@ -127,8 +127,7 @@ static uint8_t zeros_sha256_digest[32] = {
 
 // helper to hexdump buffers inline
 static void mg_tls_hexdump(const char *msg, uint8_t *buf, size_t bufsz) {
-  char p[8 * 4096];
-  MG_VERBOSE(("%s: %s", msg, mg_hex(buf, bufsz, p)));
+  MG_VERBOSE(("%s: %M", msg, mg_print_hex, bufsz, buf));
 }
 
 // helper utilities to parse ASN.1 DER
@@ -1234,7 +1233,8 @@ static int mg_parse_pem(const struct mg_str pem, const struct mg_str label,
   const char *c;
   struct mg_str caps[5];
   if (!mg_match(pem, mg_str("#-----BEGIN #-----#-----END #-----#"), caps)) {
-    *der = mg_strdup(pem);
+    der->buf = mg_mprintf("%.*s", pem.len, pem.buf);
+    der->len = pem.len;
     return 0;
   }
   if (mg_strcmp(caps[1], label) != 0 || mg_strcmp(caps[3], label) != 0) {
