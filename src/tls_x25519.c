@@ -5,6 +5,7 @@
  * License: MIT License
  */
 #include "tls_x25519.h"
+#include "util.h"
 
 const uint8_t X25519_BASE_POINT[X25519_BYTES] = {9};
 
@@ -13,10 +14,9 @@ const uint8_t X25519_BASE_POINT[X25519_BYTES] = {9};
 typedef uint32_t limb_t;
 typedef uint64_t dlimb_t;
 typedef int64_t sdlimb_t;
-#define LIMB(x) (uint32_t)(x##ull), (uint32_t) ((x##ull) >> 32)
 
 #define NLIMBS (256 / X25519_WBITS)
-typedef limb_t fe[NLIMBS];
+typedef limb_t mg_fe[NLIMBS];
 
 static limb_t umaal(limb_t *carry, limb_t acc, limb_t mand, limb_t mier) {
   dlimb_t tmp = (dlimb_t) mand * mier + acc + *carry;
@@ -41,7 +41,7 @@ static limb_t adc0(limb_t *carry, limb_t acc) {
 // - Invariant: result of propagate is < 2^255 + 1 word
 // - In particular, always less than 2p.
 // - Also, output x >= min(x,19)
-static void propagate(fe x, limb_t over) {
+static void propagate(mg_fe x, limb_t over) {
   unsigned i;
   limb_t carry;
   over = x[NLIMBS - 1] >> (X25519_WBITS - 1) | over << 1;
@@ -53,7 +53,7 @@ static void propagate(fe x, limb_t over) {
   }
 }
 
-static void add(fe out, const fe a, const fe b) {
+static void add(mg_fe out, const mg_fe a, const mg_fe b) {
   unsigned i;
   limb_t carry = 0;
   for (i = 0; i < NLIMBS; i++) {
@@ -62,7 +62,7 @@ static void add(fe out, const fe a, const fe b) {
   propagate(out, carry);
 }
 
-static void sub(fe out, const fe a, const fe b) {
+static void sub(mg_fe out, const mg_fe a, const mg_fe b) {
   unsigned i;
   sdlimb_t carry = -38;
   for (i = 0; i < NLIMBS; i++) {
@@ -73,9 +73,9 @@ static void sub(fe out, const fe a, const fe b) {
   propagate(out, (limb_t) (1 + carry));
 }
 
-// `b` can contain less than 8 limbs, thus we use `limb_t *` instead of `fe`
+// `b` can contain less than 8 limbs, thus we use `limb_t *` instead of `mg_fe`
 // to avoid build warnings
-static void mul(fe out, const fe a, const limb_t *b, unsigned nb) {
+static void mul(mg_fe out, const mg_fe a, const limb_t *b, unsigned nb) {
   limb_t accum[2 * NLIMBS] = {0};
   unsigned i, j;
 
@@ -98,13 +98,13 @@ static void mul(fe out, const fe a, const limb_t *b, unsigned nb) {
   propagate(out, carry2);
 }
 
-static void sqr(fe out, const fe a) {
+static void sqr(mg_fe out, const mg_fe a) {
   mul(out, a, a, NLIMBS);
 }
-static void mul1(fe out, const fe a) {
+static void mul1(mg_fe out, const mg_fe a) {
   mul(out, a, out, NLIMBS);
 }
-static void sqr1(fe a) {
+static void sqr1(mg_fe a) {
   mul1(a, a);
 }
 
@@ -121,7 +121,7 @@ static void condswap(limb_t a[2 * NLIMBS], limb_t b[2 * NLIMBS],
 // Canonicalize a field element x, reducing it to the least residue which is
 // congruent to it mod 2^255-19
 // - Precondition: x < 2^255 + 1 word
-static limb_t canon(fe x) {
+static limb_t canon(mg_fe x) {
   // First, add 19.
   unsigned i;
   limb_t carry0 = 19;
@@ -152,7 +152,7 @@ static limb_t canon(fe x) {
 
 static const limb_t a24[1] = {121665};
 
-static void ladder_part1(fe xs[5]) {
+static void ladder_part1(mg_fe xs[5]) {
   limb_t *x2 = xs[0], *z2 = xs[1], *x3 = xs[2], *z3 = xs[3], *t1 = xs[4];
   add(t1, x2, z2);                                 // t1 = A
   sub(z2, x2, z2);                                 // z2 = B
@@ -169,7 +169,7 @@ static void ladder_part1(fe xs[5]) {
   add(z2, z2, t1);                                 // z2 = E*a24 + AA
 }
 
-static void ladder_part2(fe xs[5], const fe x1) {
+static void ladder_part2(mg_fe xs[5], const mg_fe x1) {
   limb_t *x2 = xs[0], *z2 = xs[1], *x3 = xs[2], *z3 = xs[3], *t1 = xs[4];
   sqr1(z3);         // z3 = (DA-CB)^2
   mul1(z3, x1);     // z3 = x1 * (DA-CB)^2
@@ -179,14 +179,18 @@ static void ladder_part2(fe xs[5], const fe x1) {
   mul1(x2, t1);     // x2 = AA*BB
 }
 
-static void x25519_core(fe xs[5], const uint8_t scalar[X25519_BYTES],
+static void x25519_core(mg_fe xs[5], const uint8_t scalar[X25519_BYTES],
                         const uint8_t *x1, int clamp) {
   int i;
+  mg_fe x1_limbs;
   limb_t swap = 0;
   limb_t *x2 = xs[0], *x3 = xs[2], *z3 = xs[3];
-  memset(xs, 0, 4 * sizeof(fe));
+  memset(xs, 0, 4 * sizeof(mg_fe));
   x2[0] = z3[0] = 1;
-  memcpy(x3, x1, sizeof(fe));
+  for (i = 0; i < NLIMBS; i++) {
+    x3[i] = x1_limbs[i] =
+        MG_U32(x1[i * 4 + 3], x1[i * 4 + 2], x1[i * 4 + 1], x1[i * 4]);
+  }
 
   for (i = 255; i >= 0; i--) {
     uint8_t bytei = scalar[i / 8];
@@ -204,7 +208,7 @@ static void x25519_core(fe xs[5], const uint8_t scalar[X25519_BYTES],
     swap = doswap;
 
     ladder_part1(xs);
-    ladder_part2(xs, (const limb_t *) x1);
+    ladder_part2(xs, (const limb_t *) x1_limbs);
   }
   condswap(x2, x3, swap);
 }
@@ -212,7 +216,7 @@ static void x25519_core(fe xs[5], const uint8_t scalar[X25519_BYTES],
 int mg_tls_x25519(uint8_t out[X25519_BYTES], const uint8_t scalar[X25519_BYTES],
                   const uint8_t x1[X25519_BYTES], int clamp) {
   int i, ret;
-  fe xs[5];
+  mg_fe xs[5], out_limbs;
   limb_t *x2, *z2, *z3, *prev;
   static const struct {
     uint8_t a, c, n;
@@ -239,8 +243,15 @@ int mg_tls_x25519(uint8_t out[X25519_BYTES], const uint8_t scalar[X25519_BYTES],
 
   // Here prev = z3
   // x2 /= z2
-  mul((limb_t *) out, x2, z3, NLIMBS);
-  ret = (int) canon((limb_t *) out);
+  mul(out_limbs, x2, z3, NLIMBS);
+  ret = (int) canon(out_limbs);
   if (!clamp) ret = 0;
+  for (i = 0; i < NLIMBS; i++) {
+    uint32_t n = out_limbs[i];
+    out[i * 4] = (uint8_t) (n & 0xff);
+    out[i * 4 + 1] = (uint8_t) ((n >> 8) & 0xff);
+    out[i * 4 + 2] = (uint8_t) ((n >> 16) & 0xff);
+    out[i * 4 + 3] = (uint8_t) ((n >> 24) & 0xff);
+  }
   return ret;
 }

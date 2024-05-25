@@ -10,14 +10,14 @@ struct mg_str mg_str_n(const char *s, size_t n) {
   return str;
 }
 
-static char tolc(char c) {
+static int mg_tolc(char c) {
   return (c >= 'A' && c <= 'Z') ? c + 'a' - 'A' : c;
 }
 
 int mg_casecmp(const char *s1, const char *s2) {
   int diff = 0;
   do {
-    char c = tolc(*s1++), d = tolc(*s2++);
+    int c = mg_tolc(*s1++), d = mg_tolc(*s2++);
     diff = c - d;
   } while (diff == 0 && s1[-1] != '\0');
   return diff;
@@ -26,8 +26,8 @@ int mg_casecmp(const char *s1, const char *s2) {
 int mg_strcmp(const struct mg_str str1, const struct mg_str str2) {
   size_t i = 0;
   while (i < str1.len && i < str2.len) {
-    char c1 = str1.buf[i];
-    char c2 = str2.buf[i];
+    int c1 = str1.buf[i];
+    int c2 = str2.buf[i];
     if (c1 < c2) return -1;
     if (c1 > c2) return 1;
     i++;
@@ -40,8 +40,8 @@ int mg_strcmp(const struct mg_str str1, const struct mg_str str2) {
 int mg_strcasecmp(const struct mg_str str1, const struct mg_str str2) {
   size_t i = 0;
   while (i < str1.len && i < str2.len) {
-    char c1 = tolc(str1.buf[i]);
-    char c2 = tolc(str2.buf[i]);
+    int c1 = mg_tolc(str1.buf[i]);
+    int c2 = mg_tolc(str2.buf[i]);
     if (c1 < c2) return -1;
     if (c1 > c2) return 1;
     i++;
@@ -96,23 +96,72 @@ bool mg_span(struct mg_str s, struct mg_str *a, struct mg_str *b, char sep) {
   }
 }
 
-uint8_t mg_toi(char c, int base) {
-  return (c >= '0' && c <= '9') ? (uint8_t) (c - '0')
-         : base == 16           ? (c >= 'A' && c <= 'F')   ? (uint8_t) (c - '7')
-                                  : (c >= 'a' && c <= 'f') ? (uint8_t) (c - 'W')
-                                                           : (uint8_t) ~0
-                                : (uint8_t) ~0;
-}
-
-unsigned long mg_unhexn(const char *s, size_t len) {
-  unsigned long i = 0, v = 0;
-  for (i = 0; i < len; i++) v <<= 4, v |= mg_toi(((char *) s)[i], 16);
-  return v;
-}
-
-void mg_unhex(const char *buf, size_t len, unsigned char *to) {
-  size_t i;
-  for (i = 0; i < len; i += 2) {
-    to[i >> 1] = (unsigned char) mg_unhexn(&buf[i], 2);
+bool mg_str_to_num(struct mg_str str, int base, void *val, size_t val_len) {
+  size_t i = 0, ndigits = 0;
+  uint64_t max = val_len == sizeof(uint8_t)   ? 0xFF
+                 : val_len == sizeof(uint16_t) ? 0xFFFF
+                 : val_len == sizeof(uint32_t) ? 0xFFFFFFFF
+                                : (uint64_t) ~0;
+  uint64_t result = 0;
+  if (max == (uint64_t) ~0 && val_len != sizeof(uint64_t)) return false;
+  if (base == 0 && str.len >= 2) {
+    if (str.buf[i] == '0') {
+      i++;
+      base = str.buf[i] == 'b' ? 2 : str.buf[i] == 'x' ? 16 : 10;
+      if (base != 10) ++i;
+    } else {
+      base = 10;
+    }
   }
+  switch (base) {
+    case 2:
+      while (i < str.len && (str.buf[i] == '0' || str.buf[i] == '1')) {
+        uint64_t digit = (uint64_t) (str.buf[i] - '0');
+        if (result > max/2) return false;  // Overflow
+        result *= 2;
+        if (result > max - digit) return false;  // Overflow
+        result += digit;
+        i++, ndigits++;
+      }
+      break;
+    case 10:
+      while (i < str.len && str.buf[i] >= '0' && str.buf[i] <= '9') {
+        uint64_t digit = (uint64_t) (str.buf[i] - '0');
+        if (result > max/10) return false;  // Overflow
+        result *= 10;
+        if (result > max - digit) return false;  // Overflow
+        result += digit;
+        i++, ndigits++;
+    }
+      break;
+    case 16:
+      while (i < str.len) {
+        char c = str.buf[i];
+        uint64_t digit = (c >= '0' && c <= '9')   ? (uint64_t) (c - '0')
+                         : (c >= 'A' && c <= 'F') ? (uint64_t) (c - '7')
+                         : (c >= 'a' && c <= 'f') ? (uint64_t) (c - 'W')
+                                                  : (uint64_t) ~0;
+        if (digit == (uint64_t) ~0) break;
+        if (result > max/16) return false;  // Overflow
+        result *= 16;
+        if (result > max - digit) return false;  // Overflow
+        result += digit;
+        i++, ndigits++;
+      }
+      break;
+    default:
+      return false;
+  }
+  if (ndigits == 0) return false;
+  if (i != str.len) return false;
+  if (val_len == 1) {
+    *((uint8_t *) val) = (uint8_t) result;
+  } else if (val_len == 2) {
+    *((uint16_t *) val) = (uint16_t) result;
+  } else if (val_len == 4) {
+    *((uint32_t *) val) = (uint32_t) result;
+  } else {
+    *((uint64_t *) val) = (uint64_t) result;
+  }
+  return true;
 }

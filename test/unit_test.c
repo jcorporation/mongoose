@@ -37,9 +37,12 @@ static void test_match(void) {
   ASSERT(mg_match(mg_str_n("/x/2/foo", 8), mg_str_n("/x/*/*", 6), NULL) == 1);
   ASSERT(mg_match(mg_str_n("///", 3), mg_str_n("#", 1), NULL) == 1);
   ASSERT(mg_match(mg_str_n("/api/foo", 8), mg_str_n("/api/*", 6), NULL) == 1);
-  ASSERT(mg_match(mg_str_n("/api/log/static", 15), mg_str_n("/api/*", 6), NULL) == 0);
-  ASSERT(mg_match(mg_str_n("/api/log/static", 15), mg_str_n("/api/#", 6), NULL) == 1);
-  ASSERT(mg_match(mg_str_n("/ssi/index.shtml", 16), mg_str_n("#.shtml", 7), NULL) == 1);
+  ASSERT(mg_match(mg_str_n("/api/log/static", 15), mg_str_n("/api/*", 6),
+                  NULL) == 0);
+  ASSERT(mg_match(mg_str_n("/api/log/static", 15), mg_str_n("/api/#", 6),
+                  NULL) == 1);
+  ASSERT(mg_match(mg_str_n("/ssi/index.shtml", 16), mg_str_n("#.shtml", 7),
+                  NULL) == 1);
   ASSERT(mg_match(mg_str_n(".c", 2), mg_str_n("#.c", 3), NULL) == 1);
   ASSERT(mg_match(mg_str_n("ab", 2), mg_str_n("abc", 3), NULL) == 0);
   ASSERT(mg_match(mg_str_n("a.c", 3), mg_str_n("#.c", 3), NULL) == 1);
@@ -48,7 +51,8 @@ static void test_match(void) {
   ASSERT(mg_match(mg_str_n("//a.c", 5), mg_str_n("#.c", 3), NULL) == 1);
   ASSERT(mg_match(mg_str_n("x/a.c", 5), mg_str_n("#.c", 3), NULL) == 1);
   ASSERT(mg_match(mg_str_n("./a.c", 5), mg_str_n("#.c", 3), NULL) == 1);
-  ASSERT(mg_match(mg_str_n("./ssi/index.shtml", 17), mg_str_n("#.shtml", 7), NULL) == 1);
+  ASSERT(mg_match(mg_str_n("./ssi/index.shtml", 17), mg_str_n("#.shtml", 7),
+                  NULL) == 1);
   ASSERT(mg_match(mg_str_n("caabba", 6), mg_str_n("#aa#bb#", 7), NULL) == 1);
   ASSERT(mg_match(mg_str_n("caabxa", 6), mg_str_n("#aa#bb#", 7), NULL) == 0);
   ASSERT(mg_match(mg_str_n("a__b_c", 6), mg_str_n("a*b*c", 5), NULL) == 1);
@@ -139,7 +143,7 @@ static struct mg_str strstrip(struct mg_str s) {
   return s;
 }
 static const char *mgstrstr(const struct mg_str haystack,
-                      const struct mg_str needle) {
+                            const struct mg_str needle) {
   size_t i;
   if (needle.len > haystack.len) return NULL;
   if (needle.len == 0) return haystack.buf;
@@ -150,8 +154,6 @@ static const char *mgstrstr(const struct mg_str haystack,
   }
   return NULL;
 }
-
-
 
 static void test_url(void) {
   // Host
@@ -524,7 +526,8 @@ static void test_mqtt_basic(void) {
 
   // Publish with QoS1 to subscribed topic and check reception
   // keep former opts.topic
-  opts.message = mg_str("hi1"), opts.qos = 1, opts.retain = false, opts.retransmit_id = 0;
+  opts.message = mg_str("hi1"), opts.qos = 1, opts.retain = false,
+  opts.retransmit_id = 0;
   retries = 0;  // don't do retries for test speed
   do {          // retry on failure after an expected timeout
     opts.retransmit_id = mg_mqtt_pub(c, &opts);  // save id for possible resend
@@ -617,7 +620,7 @@ static void test_mqtt_ver(uint8_t mqtt_version) {
   ASSERT(test_data.flags & flags_received);
   test_data.flags &= ~flags_received;
   opts.retransmit_id = 0;
-// Mongoose sent PUBREL, wait for PUBCOMP
+  // Mongoose sent PUBREL, wait for PUBCOMP
   for (i = 0; i < 500 && !(test_data.flags & flags_completed); i++)
     mg_mgr_poll(&mgr, 10);
   // TODO(): retry sending PUBREL on failure after an expected timeout
@@ -1232,6 +1235,7 @@ static void f3(struct mg_connection *c, int ev, void *ev_data) {
   // MG_INFO(("%d", ev));
   if (ev == MG_EV_CONNECT) {
     // c->is_hexdumping = 1;
+    ASSERT((c->loc.ip[0] != 0));  // Make sure that c->loc address is populated
     mg_printf(c, "GET /%s HTTP/1.0\r\nHost: %s\r\n\r\n",
               c->rem.is_ip6 ? "" : "/robots.txt",
               c->rem.is_ip6 ? "ipv6.google.com" : "cesanta.com");
@@ -1241,6 +1245,7 @@ static void f3(struct mg_connection *c, int ev, void *ev_data) {
     // ASSERT(vcmp(hm->method, "HTTP/1.1"));
     // ASSERT(vcmp(hm->uri, "301"));
     *ok = mg_http_status(hm);
+    c->is_closing = 1;
   } else if (ev == MG_EV_CLOSE) {
     if (*ok == 0) *ok = 888;
   } else if (ev == MG_EV_ERROR) {
@@ -1265,8 +1270,6 @@ static void test_http_client(void) {
   for (i = 0; i < 500 && ok <= 0; i++) mg_mgr_poll(&mgr, 1);
   MG_INFO(("%d", ok));
   ASSERT(ok == 301);
-  c->is_closing = 1;
-  ASSERT((c->loc.ip[0] != 0));  // Make sure that c->loc address is populated
   mg_mgr_poll(&mgr, 0);
   ok = 0;
 #if MG_TLS
@@ -1275,7 +1278,6 @@ static void test_http_client(void) {
   mg_tls_init(c, &opts);
   for (i = 0; i < 1500 && ok <= 0; i++) mg_mgr_poll(&mgr, 1);
   ASSERT(ok == 200);
-  c->is_closing = 1;
   mg_mgr_poll(&mgr, 1);
 
   // Test failed host validation
@@ -1289,6 +1291,9 @@ static void test_http_client(void) {
   ASSERT(ok == 777);
   mg_mgr_poll(&mgr, 1);
 
+  // Test empty CA
+  // Disable mbedTLS: https://github.com/Mbed-TLS/mbedtls/issues/7075
+#if MG_TLS != MG_TLS_MBED
   opts.name = mg_str("cesanta.com");
   opts.ca = mg_str("");
   c = mg_http_connect(&mgr, "https://cesanta.com", f3, &ok);
@@ -1298,6 +1303,7 @@ static void test_http_client(void) {
   MG_INFO(("OK: %d", ok));
   ASSERT(ok == 200);
   mg_mgr_poll(&mgr, 1);
+#endif
 #endif
 
 #if MG_ENABLE_IPV6
@@ -1311,33 +1317,6 @@ static void test_http_client(void) {
 
   mg_mgr_free(&mgr);
   ASSERT(mgr.conns == NULL);
-}
-
-// Test host validation only (no CA, no cert)
-static void test_host_validation(void) {
-#if MG_TLS
-  const char *url = "https://cesanta.com";
-  struct mg_tls_opts opts;
-  struct mg_mgr mgr;
-  struct mg_connection *c = NULL;
-  int i, ok = 0;
-  memset(&opts, 0, sizeof(opts));
-  mg_mgr_init(&mgr);
-
-  ok = 0;
-  c = mg_http_connect(&mgr, url, f3, &ok);
-  ASSERT(c != NULL);
-  opts.ca = mg_unpacked("/data/ca.pem");
-  opts.name = mg_url_host(url);
-  mg_tls_init(c, &opts);
-  for (i = 0; i < 1500 && ok <= 0; i++) mg_mgr_poll(&mgr, 10);
-  ASSERT(ok == 200);
-  c->is_closing = 1;
-  mg_mgr_poll(&mgr, 1);
-
-  mg_mgr_free(&mgr);
-  ASSERT(mgr.conns == NULL);
-#endif
 }
 
 static void f4(struct mg_connection *c, int ev, void *ev_data) {
@@ -1899,17 +1878,6 @@ static void test_str(void) {
   ASSERT(mg_strcasecmp(mg_str("b"), mg_str("A")) > 0);
   ASSERT(mg_strcasecmp(mg_str("hi"), mg_str("HI")) == 0);
 
-  ASSERT(mg_toi('0', 10) == 0);
-  ASSERT(mg_toi('9', 10) == 9);
-  ASSERT(mg_toi('A', 10) == (uint8_t) ~0);
-  ASSERT(mg_toi('0', 16) == 0);
-  ASSERT(mg_toi('9', 16) == 9);
-  ASSERT(mg_toi('A', 16) == 10);
-  ASSERT(mg_toi('a', 16) == 10);
-  ASSERT(mg_toi('f', 16) == 15);
-  ASSERT(mg_toi('F', 16) == 15);
-  ASSERT(mg_toi('G', 16) == (uint8_t) ~0);
-
   {
     ASSERT(chkdbl(mg_str_n("1.23", 3), 1.2));
     ASSERT(chkdbl(mg_str("1.23 "), 1.23));
@@ -2298,6 +2266,9 @@ static void test_util(void) {
 
   ASSERT(mg_url_decode("a=%", 3, buf, sizeof(buf), 0) < 0);
   ASSERT(mg_url_decode("&&&a=%", 6, buf, sizeof(buf), 0) < 0);
+  ASSERT(mg_url_decode("a=%1", 4, buf, sizeof(buf), 0) < 0);
+  ASSERT(mg_url_decode("a=%12", 5, buf, sizeof(buf), 0) == 3 && buf[2] == 0x12);
+  ASSERT(mg_url_decode("a=%123", 6, buf, sizeof(buf), 0) == 4 && buf[2] == 0x12 && buf[3] == '3');
 
   memset(a.ip, 0xaa, sizeof(a.ip));
   ASSERT(mg_aton(mg_str("::1%1"), &a) == true);
@@ -2350,6 +2321,70 @@ static void test_util(void) {
     ASSERT(mg_to_size_t(mg_str("-"), &val) == false);
     mg_snprintf(buf, sizeof(buf), sizeof(max) == 8 ? "%llu" : "%lu", max);
     ASSERT(mg_to_size_t(mg_str(buf), &val) && val == max);
+  }
+
+  {
+    uint64_t val, max = (uint64_t) -1;
+    ASSERT(mg_str_to_num(mg_str("0"), 10, &val, sizeof(uint64_t)) && val == 0);
+    ASSERT(mg_str_to_num(mg_str("123"), 10, &val, sizeof(uint64_t)) && val == 123);
+    ASSERT(mg_str_to_num(mg_str(" 123"), 10, &val, sizeof(uint64_t)) == false);
+    ASSERT(mg_str_to_num(mg_str("123 "), 10, &val, sizeof(uint64_t)) == false);
+    ASSERT(mg_str_to_num(mg_str(""), 10, &val, sizeof(uint64_t)) == false);
+    ASSERT(mg_str_to_num(mg_str(" 123x"), 10, &val, sizeof(uint64_t)) == false);
+    ASSERT(mg_str_to_num(mg_str("-"), 10, &val, sizeof(uint64_t)) == false);
+    mg_snprintf(buf, sizeof(buf), "%llu", max);
+    ASSERT(mg_str_to_num(mg_str(buf), 10, &val, sizeof(uint64_t)) && val == max);
+    ASSERT(mg_str_to_num(mg_str("0"), 2, &val, sizeof(uint64_t)) && val == 0);
+    ASSERT(mg_str_to_num(mg_str("1"), 2, &val, sizeof(uint64_t)) && val == 1);
+    ASSERT(mg_str_to_num(mg_str("0123"), 2, &val, sizeof(uint64_t)) == false);
+    ASSERT(mg_str_to_num(mg_str("123"), 2, &val, sizeof(uint64_t)) == false);
+    ASSERT(mg_str_to_num(mg_str("01111011"), 2, &val, sizeof(uint64_t)) && val == 123);
+    ASSERT(mg_str_to_num(mg_str("1111111111111111111111111111111111111111111111111111111111111111"), 2, &val, sizeof(uint64_t)) && val == max);
+    ASSERT(mg_str_to_num(mg_str("0"), 16, &val, sizeof(uint64_t)) && val == 0);
+    ASSERT(mg_str_to_num(mg_str("123"), 16, &val, sizeof(uint64_t)) && val == 0x123);
+    ASSERT(mg_str_to_num(mg_str("def"), 16, &val, sizeof(uint64_t)) && val == 0xdef);
+    ASSERT(mg_str_to_num(mg_str("defg"), 16, &val, sizeof(uint64_t)) == false);
+    mg_snprintf(buf, sizeof(buf), "%llx", max);
+    ASSERT(mg_str_to_num(mg_str(buf), 16, &val, sizeof(uint64_t)) && val == max);
+    ASSERT(mg_str_to_num(mg_str("0x123"), 0, &val, sizeof(uint64_t)) && val == 0x123);
+    ASSERT(mg_str_to_num(mg_str("0b123"), 0, &val, sizeof(uint64_t)) == false);
+    ASSERT(mg_str_to_num(mg_str("0c123"), 0, &val, sizeof(uint64_t)) == false);
+    ASSERT(mg_str_to_num(mg_str("0b101"), 0, &val, sizeof(uint64_t)) && val == 5);
+    ASSERT(mg_str_to_num(mg_str("0123"), 0, &val, sizeof(uint64_t)) && val == 123);
+  }
+  {
+    uint32_t val, max = (uint32_t) -1;
+    ASSERT(mg_str_to_num(mg_str("123"), 10, &val, sizeof(uint32_t)) && val == 123);
+    mg_snprintf(buf, sizeof(buf), "%lu", max);
+    ASSERT(mg_str_to_num(mg_str(buf), 10, &val, sizeof(uint32_t)) && val == max);
+    ASSERT(mg_str_to_num(mg_str("01111011"), 2, &val, sizeof(uint32_t)) && val == 123);
+    ASSERT(mg_str_to_num(mg_str("11111111111111111111111111111111"), 2, &val, sizeof(uint32_t)) && val == max);
+    ASSERT(mg_str_to_num(mg_str("0"), 16, &val, sizeof(uint32_t)) && val == 0);
+    ASSERT(mg_str_to_num(mg_str("123"), 16, &val, sizeof(uint32_t)) && val == 0x123);
+    mg_snprintf(buf, sizeof(buf), "%lx", max);
+    ASSERT(mg_str_to_num(mg_str(buf), 16, &val, sizeof(uint32_t)) && val == max);
+  }
+  {
+    uint16_t val, max = (uint16_t) -1;
+    ASSERT(mg_str_to_num(mg_str("123"), 10, &val, sizeof(uint16_t)) && val == 123);
+    mg_snprintf(buf, sizeof(buf), "%u", max);
+    ASSERT(mg_str_to_num(mg_str(buf), 10, &val, sizeof(uint16_t)) && val == max);
+    ASSERT(mg_str_to_num(mg_str("01111011"), 2, &val, sizeof(uint16_t)) && val == 123);
+    ASSERT(mg_str_to_num(mg_str("1111111111111111"), 2, &val, sizeof(uint16_t)) && val == max);
+    ASSERT(mg_str_to_num(mg_str("123"), 16, &val, sizeof(uint16_t)) && val == 0x123);
+    mg_snprintf(buf, sizeof(buf), "%x", max);
+    ASSERT(mg_str_to_num(mg_str(buf), 16, &val, sizeof(uint16_t)) && val == max);
+  }
+  {
+    uint8_t val, max = (uint8_t) -1;
+    ASSERT(mg_str_to_num(mg_str("123"), 10, &val, sizeof(uint8_t)) && val == 123);
+    mg_snprintf(buf, sizeof(buf), "%u", max);
+    ASSERT(mg_str_to_num(mg_str(buf), 10, &val, sizeof(uint8_t)) && val == max);
+    ASSERT(mg_str_to_num(mg_str("01111011"), 2, &val, sizeof(uint8_t)) && val == 123);
+    ASSERT(mg_str_to_num(mg_str("11111111"), 2, &val, sizeof(uint8_t)) && val == max);
+    ASSERT(mg_str_to_num(mg_str("12"), 16, &val, sizeof(uint8_t)) && val == 0x12);
+    mg_snprintf(buf, sizeof(buf), "%x", max);
+    ASSERT(mg_str_to_num(mg_str(buf), 16, &val, sizeof(uint8_t)) && val == max);
   }
 
   {
@@ -2949,6 +2984,17 @@ static void test_json(void) {
   ASSERT(mg_json_get(json, "$.c", &n) == 19 && n == 1);
 
   {
+    char to[4], expect[4] = {0,0,0,0};
+    memset(to, 0, sizeof(to));
+    ASSERT(mg_json_unescape(mg_str("\\u0000"), to, 4) && memcmp(to, expect, 4) == 0);
+    to[0] = 0;
+    expect[0] = (char) 0xff;
+    ASSERT(mg_json_unescape(mg_str("\\u00ff"), to, 4) && memcmp(to, expect, 4) == 0);
+    ASSERT(!mg_json_unescape(mg_str("\\u0100"), to, 4));
+    ASSERT(!mg_json_unescape(mg_str("\\u1000"), to, 4));
+  }
+
+  {
     double d = 0;
     bool b = false;
     int len;
@@ -3349,11 +3395,25 @@ static void test_split(void) {
   ASSERT(mg_strcmp(b, mg_str("")) == 0);
 }
 
+static void test_crypto(void) {
+  uint8_t key[X25519_BYTES];
+  uint8_t buf[X25519_BYTES];
+  char tmp[100];
+  size_t i;
+  for (i = 0; i < sizeof(key); i++) key[i] = (uint8_t) i;
+  for (i = 0; i < sizeof(buf); i++) buf[i] = 0;
+  mg_tls_x25519(buf, key, X25519_BASE_POINT, 1);
+  mg_snprintf(tmp, sizeof(tmp), "%M", mg_print_hex, sizeof(buf), buf);
+  MG_INFO(("%s", tmp));
+  ASSERT(mg_strcmp(mg_str("8f40c5adb6"), mg_str_n(tmp, 10)) == 0);
+}
+
 int main(void) {
   const char *debug_level = getenv("V");
   if (debug_level == NULL) debug_level = "3";
   mg_log_set(atoi(debug_level));
 
+  test_crypto();
   test_split();
   test_json();
   test_queue();
@@ -3382,7 +3442,6 @@ int main(void) {
   test_tls();
   test_ws();
   test_ws_fragmentation();
-  test_host_validation();
   test_http_server();
   test_http_404();
   test_http_no_content_length();
