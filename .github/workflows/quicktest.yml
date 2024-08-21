@@ -25,7 +25,7 @@ jobs:
       with: { fetch-depth: 2 }
     - run: if ./test/match_changed_files.sh '^test|^src/.*.[ch]' ; then echo GO=1 >> $GITHUB_ENV ; fi
     - if: ${{ env.GO == 1 }}
-      run: ./test/setup_ga_network.sh && make -C test ${{ matrix.target }}
+      run: make -C test ${{ matrix.target }}
   s390:
     runs-on: ubuntu-latest
     steps:
@@ -241,12 +241,16 @@ jobs:
       fail-fast: false
       matrix:
         example:
+          - path: infineon/infineon-xmc7200
           - path: microchip/same54-xpro/device-dashboard
+          - path: nxp/frdm-mcxn947-make-baremetal-builtin
+          - path: nxp/frdm-mcxn947-make-freertos-builtin
           - path: nxp/rt1020-evk-make-baremetal-builtin
           - path: nxp/rt1020-evk-make-freertos-builtin
           - path: nxp/rt1060-evk-make-baremetal-builtin
           - path: nxp/rt1060-evk-make-freertos-builtin
           - path: nxp/rt1170-evk-make-baremetal-builtin
+          - path: nxp/rt1170-evk-make-freertos-builtin
           - path: renesas/ek-ra6m4-make-baremetal-builtin
           - path: rp2040/pico-rndis-dashboard
           - path: rp2040/pico-w
@@ -657,11 +661,11 @@ jobs:
         if ./test/match_changed_files.sh '^src|examples/device-dashboard|examples/nxp/rt1170-evk-make-baremetal-builtin'; then
           make -C examples/nxp/rt1170-evk-make-baremetal-builtin test VCON_API_KEY=${{secrets.VCON_API_KEY}}
         fi
-#    - if: ${{ env.GO == 1 }}
-#      run: |
-#        if ./test/match_changed_files.sh 'examples/nxp/rt1170-evk-make-freertos-builtin'; then
-#          make -C examples/nxp/rt1170-evk-make-freertos-builtin test VCON_API_KEY=${{secrets.VCON_API_KEY}}
-#        fi
+    - if: ${{ env.GO == 1 }}
+      run: |
+        if ./test/match_changed_files.sh 'examples/nxp/rt1170-evk-make-freertos-builtin'; then
+          make -C examples/nxp/rt1170-evk-make-freertos-builtin test VCON_API_KEY=${{secrets.VCON_API_KEY}}
+        fi
 
   test_ra6m4:
     runs-on: ubuntu-latest

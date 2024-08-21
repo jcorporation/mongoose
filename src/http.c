@@ -185,7 +185,7 @@ int mg_url_decode(const char *src, size_t src_len, char *dst, size_t dst_len,
 }
 
 static bool isok(uint8_t c) {
-  return c == '\n' || c == '\r' || c >= ' ';
+  return c == '\n' || c == '\r' || c == '\t' || c >= ' ';
 }
 
 int mg_http_get_request_len(const unsigned char *buf, size_t buf_len) {
@@ -247,9 +247,11 @@ static bool mg_http_parse_headers(const char *s, const char *end,
     if (s >= end || clen(s, end) == 0) return false;  // Invalid UTF-8
     if (*s++ != ':') return false;  // Invalid, not followed by :
     // if (clen(s, end) == 0) return false;        // Invalid UTF-8
-    while (s < end && s[0] == ' ') s++;  // Skip spaces
+    while (s < end && (s[0] == ' ' || s[0] == '\t')) s++;  // Skip spaces
     if ((s = skiptorn(s, end, &v)) == NULL) return false;
-    while (v.len > 0 && v.buf[v.len - 1] == ' ') v.len--;  // Trim spaces
+    while (v.len > 0 && (v.buf[v.len - 1] == ' ' || v.buf[v.len - 1] == '\t')) {
+      v.len--;  // Trim spaces
+    }
     // MG_INFO(("--HH [%.*s] [%.*s]", (int) k.len, k.buf, (int) v.len, v.buf));
     h[i].name = k, h[i].value = v;  // Success. Assign values
   }
@@ -635,7 +637,6 @@ void mg_http_serve_file(struct mg_connection *c, struct mg_http_message *hm,
               etag, (uint64_t) cl, gzip ? "Content-Encoding: gzip\r\n" : "",
               range, opts->extra_headers ? opts->extra_headers : "");
     if (mg_strcasecmp(hm->method, mg_str("HEAD")) == 0) {
-      c->is_draining = 1;
       c->is_resp = 0;
       mg_fs_close(fd);
     } else {
@@ -996,7 +997,9 @@ static int skip_chunk(const char *buf, int len, int *pl, int *dl) {
 }
 
 static void http_cb(struct mg_connection *c, int ev, void *ev_data) {
-  if (ev == MG_EV_READ || ev == MG_EV_CLOSE) {
+  if (ev == MG_EV_READ || ev == MG_EV_CLOSE ||
+      (ev == MG_EV_POLL && c->is_accepted && !c->is_draining &&
+       c->recv.len > 0)) {  // see #2796
     struct mg_http_message hm;
     size_t ofs = 0;  // Parsing offset
     while (c->is_resp == 0 && ofs < c->recv.len) {
@@ -1037,6 +1040,7 @@ static void http_cb(struct mg_connection *c, int ev, void *ev_data) {
           // contain a Content-length header. Other requests can also contain a
           // body, but their content has no defined semantics (RFC 7231)
           require_content_len = true;
+          ofs += (size_t) n;  // this request has been processed
         } else if (is_response) {
           // HTTP spec 7.2 Entity body: All other responses must include a body
           // or Content-Length header field defined with a value of 0.
@@ -1079,6 +1083,13 @@ static void http_cb(struct mg_connection *c, int ev, void *ev_data) {
 
       if (c->is_accepted) c->is_resp = 1;  // Start generating response
       mg_call(c, MG_EV_HTTP_MSG, &hm);     // User handler can clear is_resp
+      if (c->is_accepted) {
+        struct mg_str *cc = mg_http_get_header(&hm, "Connection");
+        if (cc != NULL && mg_strcasecmp(*cc, mg_str("close")) == 0) {
+          c->is_draining = 1;  // honor "Connection: close"
+          break;
+        }
+      }
     }
     if (ofs > 0) mg_iobuf_del(&c->recv, 0, ofs);  // Delete processed data
   }

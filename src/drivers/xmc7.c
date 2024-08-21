@@ -59,12 +59,15 @@ struct ETH_Type {
 #define ETH_DESC_CNT 4     // Descriptors count
 #define ETH_DS 2           // Descriptor size (words)
 
+// TODO(): handle these in a portable compiler-independent CMSIS-friendly way
+#define MG_8BYTE_ALIGNED __attribute__((aligned((8U))))
+
 static uint8_t s_rxbuf[ETH_DESC_CNT][ETH_PKT_SIZE];
 static uint8_t s_txbuf[ETH_DESC_CNT][ETH_PKT_SIZE];
-static uint32_t s_rxdesc[ETH_DESC_CNT][ETH_DS];  // RX descriptors
-static uint32_t s_txdesc[ETH_DESC_CNT][ETH_DS];  // TX descriptors
-static uint8_t s_txno;                           // Current TX descriptor
-static uint8_t s_rxno;                           // Current RX descriptor
+static uint32_t s_rxdesc[ETH_DESC_CNT][ETH_DS] MG_8BYTE_ALIGNED;
+static uint32_t s_txdesc[ETH_DESC_CNT][ETH_DS] MG_8BYTE_ALIGNED;
+static uint8_t s_txno MG_8BYTE_ALIGNED;     // Current TX descriptor
+static uint8_t s_rxno MG_8BYTE_ALIGNED;     // Current RX descriptor
 
 static struct mg_tcpip_if *s_ifp;  // MIP interface
 enum { MG_PHY_ADDR = 0, MG_PHYREG_BCR = 0, MG_PHYREG_BSR = 1 };
@@ -95,14 +98,14 @@ static bool mg_tcpip_driver_xmc7_init(struct mg_tcpip_if *ifp) {
   s_ifp = ifp;
 
   // enable controller, set RGMII mode
-  ETH0->CTL = MG_BIT(31) | 2;
+  ETH0->CTL = MG_BIT(31) | (4 << 8) | 2;
 
   uint32_t cr = get_clock_rate(d);
   // set NSP change, ignore RX FCS, data bus width, clock rate
   // frame length 1536, full duplex, speed
   ETH0->NETWORK_CONFIG = MG_BIT(29) | MG_BIT(26) | MG_BIT(21) |
-                         ((cr & 7) << 18) | MG_BIT(8) | MG_BIT(4) |
-                         MG_BIT(1) | MG_BIT(0);
+                         ((cr & 7) << 18) | MG_BIT(8) | MG_BIT(4) | MG_BIT(1) |
+                         MG_BIT(0);
 
   // config DMA settings: Force TX burst, Discard on Error, set RX buffer size
   // to 1536, TX_PBUF_SIZE, RX_PBUF_SIZE, AMBA_BURST_LENGTH
@@ -131,8 +134,8 @@ static bool mg_tcpip_driver_xmc7_init(struct mg_tcpip_if *ifp) {
   ETH0->RECEIVE_Q2_PTR = 1;
   ETH0->RECEIVE_Q1_PTR = 1;
 
-  // enable interrupts (TX and RX complete)
-  ETH0->INT_ENABLE = MG_BIT(7) | MG_BIT(1);
+  // enable interrupts (RX complete)
+  ETH0->INT_ENABLE = MG_BIT(1);
 
   // set MAC address
   ETH0->SPEC_ADD1_BOTTOM =
@@ -186,15 +189,30 @@ static bool mg_tcpip_driver_xmc7_up(struct mg_tcpip_if *ifp) {
   struct mg_phy phy = {eth_read_phy, eth_write_phy};
   up = mg_phy_up(&phy, d->phy_addr, &full_duplex, &speed);
   if ((ifp->state == MG_TCPIP_STATE_DOWN) && up) {  // link state just went up
+    // tmp = reg with flags set to the most likely situation: 100M full-duplex
+    // if(link is slow or half) set flags otherwise
+    // reg = tmp
+    uint32_t netconf = ETH0->NETWORK_CONFIG;
+    MG_SET_BITS(netconf, MG_BIT(10),
+                MG_BIT(1) | MG_BIT(0));  // 100M, Full-duplex
+    uint32_t ctl = ETH0->CTL;
+    MG_SET_BITS(ctl, 0xFF00, 4 << 8);  // /5 for 25M clock
     if (speed == MG_PHY_SPEED_1000M) {
-		  ETH0->NETWORK_CONFIG |= MG_BIT(10);
-	  }
+      netconf |= MG_BIT(10);        // 1000M
+      MG_SET_BITS(ctl, 0xFF00, 0);  // /1 for 125M clock TODO() IS THIS NEEDED ?
+    } else if (speed == MG_PHY_SPEED_10M) {
+      netconf &= ~MG_BIT(0);         // 10M
+      MG_SET_BITS(ctl, 0xFF00, 49);  // /50 for 2.5M clock
+    }
+    if (full_duplex == false) netconf &= ~MG_BIT(1);  // Half-duplex
+    ETH0->NETWORK_CONFIG = netconf;  // IRQ handler does not fiddle with these
+    ETH0->CTL = ctl;
     MG_DEBUG(("Link is %uM %s-duplex",
-              speed == MG_PHY_SPEED_10M ? 10 : 
-              (speed == MG_PHY_SPEED_100M ? 100 : 1000),
+              speed == MG_PHY_SPEED_10M
+                  ? 10
+                  : (speed == MG_PHY_SPEED_100M ? 100 : 1000),
               full_duplex ? "full" : "half"));
   }
-  (void) d;
   return up;
 }
 
@@ -204,7 +222,6 @@ void ETH_IRQHandler(void) {
     for (uint8_t i = 0; i < ETH_DESC_CNT; i++) {
       if (s_rxdesc[s_rxno][0] & MG_BIT(0)) {
         size_t len = s_rxdesc[s_rxno][1] & (MG_BIT(13) - 1);
-        //MG_INFO(("Receive complete: %ld bytes", len));
         mg_tcpip_qwrite(s_rxbuf[s_rxno], len, s_ifp);
         s_rxdesc[s_rxno][0] &= ~MG_BIT(0);  // OWN bit: handle control to DMA
         if (++s_rxno >= ETH_DESC_CNT) s_rxno = 0;

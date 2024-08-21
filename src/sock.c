@@ -276,17 +276,27 @@ static void read_conn(struct mg_connection *c) {
     size_t len = c->recv.size - c->recv.len;
     long n = -1;
     if (c->is_tls) {
-      if (!ioalloc(c, &c->rtls)) return;
-      n = recv_raw(c, (char *) &c->rtls.buf[c->rtls.len],
-                   c->rtls.size - c->rtls.len);
-      if (n == MG_IO_ERR && c->rtls.len == 0) {
-        // Close only if we have fully drained both raw (rtls) and TLS buffers
-        c->is_closing = 1;
-      } else {
-        if (n > 0) c->rtls.len += (size_t) n;
-        if (c->is_tls_hs) mg_tls_handshake(c);
-        n = c->is_tls_hs ? (long) MG_IO_WAIT : mg_tls_recv(c, buf, len);
+      // Do not read to the raw TLS buffer if it already has enough.
+      // This is to prevent overflowing c->rtls if our reads are slow
+      if (c->rtls.len < 16 * 1024 + 40) {  // TLS record, header, MAC, padding
+        if (!ioalloc(c, &c->rtls)) return;
+        n = recv_raw(c, (char *) &c->rtls.buf[c->rtls.len],
+                     c->rtls.size - c->rtls.len);
+        if (n == MG_IO_ERR) {
+          if (c->rtls.len == 0 || c->is_io_err) {
+            // Close only when we have fully drained both rtls and TLS buffers
+            c->is_closing = 1;  // or there's nothing we can do about it.
+          } else {  // TLS buffer is capped to max record size, mark and
+            c->is_io_err = 1;  // give TLS a chance to process that.
+          }
+        } else {
+          if (n > 0) c->rtls.len += (size_t) n;
+          if (c->is_tls_hs) mg_tls_handshake(c);
+        }
       }
+      n = c->is_tls_hs    ? (long) MG_IO_WAIT
+          : c->is_closing ? -1
+                          : mg_tls_recv(c, buf, len);
     } else {
       n = recv_raw(c, buf, len);
     }
@@ -353,8 +363,9 @@ static void setsockopts(struct mg_connection *c) {
 
 void mg_connect_resolved(struct mg_connection *c) {
   int type = c->is_udp ? SOCK_DGRAM : SOCK_STREAM;
+  int proto = type == SOCK_DGRAM ? IPPROTO_UDP : IPPROTO_TCP;
   int rc, af = c->rem.is_ip6 ? AF_INET6 : AF_INET;  // c->rem has resolved IP
-  c->fd = S2PTR(socket(af, type, 0));               // Create outbound socket
+  c->fd = S2PTR(socket(af, type, proto));           // Create outbound socket
   c->is_resolving = 0;                              // Clear resolving flag
   if (FD(c) == MG_INVALID_SOCKET) {
     mg_error(c, "socket(): %d", MG_SOCK_ERR(-1));
@@ -507,15 +518,15 @@ static void mg_iotest(struct mg_mgr *mgr, int ms) {
   n = 0;
   for (struct mg_connection *c = mgr->conns; c != NULL; c = c->next) {
     c->is_readable = c->is_writable = 0;
+    if (c->is_closing) ms = 1;
     if (skip_iotest(c)) {
       // Socket not valid, ignore
-    } else if (c->rtls.len > 0 || mg_tls_pending(c) > 0) {
-      ms = 1;  // Don't wait if TLS is ready
     } else {
+      // Don't wait if TLS is ready
+      if (c->rtls.len > 0 || mg_tls_pending(c) > 0) ms = 1;
       fds[n].fd = FD(c);
       if (can_read(c)) fds[n].events |= POLLIN;
       if (can_write(c)) fds[n].events |= POLLOUT;
-      if (c->is_closing) ms = 1;
       n++;
     }
   }
@@ -531,8 +542,6 @@ static void mg_iotest(struct mg_mgr *mgr, int ms) {
   for (struct mg_connection *c = mgr->conns; c != NULL; c = c->next) {
     if (skip_iotest(c)) {
       // Socket not valid, ignore
-    } else if (c->rtls.len > 0 || mg_tls_pending(c) > 0) {
-      c->is_readable = 1;
     } else {
       if (fds[n].revents & POLLERR) {
         mg_error(c, "socket error");
@@ -564,7 +573,7 @@ static void mg_iotest(struct mg_mgr *mgr, int ms) {
     if (can_write(c)) FD_SET(FD(c), &wset);
     if (c->rtls.len > 0 || mg_tls_pending(c) > 0) tvp = &tv_zero;
     if (FD(c) > maxfd) maxfd = FD(c);
-    if (c->is_closing) ms = 1;
+    if (c->is_closing) tvp = &tv_zero;
   }
 
   if ((rc = select((int) maxfd + 1, &rset, &wset, &eset, tvp)) < 0) {
@@ -600,8 +609,8 @@ static bool mg_socketpair(MG_SOCKET_TYPE sp[2], union usa usa[2]) {
   *(uint32_t *) &usa->sin.sin_addr = mg_htonl(0x7f000001U);  // 127.0.0.1
   usa[1] = usa[0];
 
-  if ((sp[0] = socket(AF_INET, SOCK_DGRAM, 0)) != MG_INVALID_SOCKET &&
-      (sp[1] = socket(AF_INET, SOCK_DGRAM, 0)) != MG_INVALID_SOCKET &&
+  if ((sp[0] = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) != MG_INVALID_SOCKET &&
+      (sp[1] = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) != MG_INVALID_SOCKET &&
       bind(sp[0], &usa[0].sa, n) == 0 &&          //
       bind(sp[1], &usa[1].sa, n) == 0 &&          //
       getsockname(sp[0], &usa[0].sa, &n) == 0 &&  //

@@ -85,12 +85,12 @@ all:
 
 tall: mg_prefix unamalgamated test mip_test arm examples vc98 vc17 vc22 mingw mingw++ fuzz
 
-mip_test: mip_test.c mongoose.c mongoose.h Makefile mip_tap_test
-	$(CC) mip_test.c $(INCS) $(WARN) $(OPTS) $(C_WARN) $(ASAN) -o $@
+mip_test: mip_test.c mongoose.c mongoose.h packed_fs.c Makefile
+	$(CC) mip_test.c packed_fs.c $(CFLAGS) $(LDFLAGS) -o $@
 	ASAN_OPTIONS=$(ASAN_OPTIONS) $(RUN) ./$@
 
-mip_tap_test: mip_tap_test.c mongoose.c mongoose.h Makefile
-	$(CC) mip_tap_test.c $(INCS) $(WARN) $(OPTS) $(C_WARN) $(ASAN) -o $@
+mip_tap_test: mip_tap_test.c mongoose.c mongoose.h packed_fs.c Makefile
+	$(CC) mip_tap_test.c packed_fs.c $(CFLAGS) $(LDFLAGS) -o $@
 	ASAN_OPTIONS=$(ASAN_OPTIONS) $(RUN) ./$@
 
 packed_fs.c: Makefile data/ssi.h fuzz.c data/a.txt data/ca.pem certs/ca.crt certs/server.crt certs/server.key
@@ -202,7 +202,7 @@ mongoose.c: Makefile $(wildcard ../src/*.c) $(wildcard ../src/drivers/*.c)
 	cd .. && (export LC_ALL=C ; cat src/license.h; echo; echo '#include "mongoose.h"' ; (for F in src/*.c src/drivers/*.c ; do echo; echo '#ifdef MG_ENABLE_LINES'; echo "#line 1 \"$$F\""; echo '#endif'; cat $$F | sed -e 's,#include ".*,,'; done))> $@
 
 mongoose.h: $(HDRS) Makefile
-	cd .. && (cat src/license.h; echo; echo '#ifndef MONGOOSE_H'; echo '#define MONGOOSE_H'; echo; cat src/version.h ; echo; echo '#ifdef __cplusplus'; echo 'extern "C" {'; echo '#endif'; cat src/arch.h src/arch_*.h src/net_ft.h src/net_lwip.h src/net_rl.h src/config.h src/str.h src/queue.h src/fmt.h src/printf.h src/log.h src/timer.h src/fs.h src/util.h src/url.h src/iobuf.h src/base64.h src/md5.h src/sha1.h src/sha256.h src/tls_x25519.h src/tls_aes128.h src/tls_uecc.h src/event.h src/net.h src/http.h src/ssi.h src/tls.h src/tls_mbed.h src/tls_openssl.h src/ws.h src/sntp.h src/mqtt.h src/dns.h src/json.h src/rpc.h src/ota.h src/device.h src/net_builtin.h src/profile.h src/drivers/*.h | sed -e '/keep/! s,#include ".*,,' -e 's,^#pragma once,,'; echo; echo '#ifdef __cplusplus'; echo '}'; echo '#endif'; echo '#endif  // MONGOOSE_H')> $@
+	cd .. && (cat src/license.h; echo; echo '#ifndef MONGOOSE_H'; echo '#define MONGOOSE_H'; echo; cat src/version.h ; echo; echo '#ifdef __cplusplus'; echo 'extern "C" {'; echo '#endif'; cat src/arch.h src/arch_*.h src/net_ft.h src/net_lwip.h src/net_rl.h src/config.h src/str.h src/queue.h src/fmt.h src/printf.h src/log.h src/timer.h src/fs.h src/util.h src/url.h src/iobuf.h src/base64.h src/md5.h src/sha1.h src/sha256.h src/tls_x25519.h src/tls_aes128.h src/tls_uecc.h src/tls_chacha20.h src/event.h src/net.h src/http.h src/ssi.h src/tls.h src/tls_mbed.h src/tls_openssl.h src/ws.h src/sntp.h src/mqtt.h src/dns.h src/json.h src/rpc.h src/ota.h src/device.h src/net_builtin.h src/profile.h src/drivers/*.h | sed -e '/keep/! s,#include ".*,,' -e 's,^#pragma once,,'; echo; echo '#ifdef __cplusplus'; echo '}'; echo '#endif'; echo '#endif  // MONGOOSE_H')> $@
 
 
 clean: clean_examples clean_refprojs clean_tutorials clean_examples_embedded

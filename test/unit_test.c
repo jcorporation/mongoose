@@ -95,6 +95,16 @@ static void test_match(void) {
     ASSERT(mg_strcmp(caps[0], mg_str("a")) == 0);
     ASSERT(mg_strcmp(caps[1], mg_str("bc")) == 0);
     ASSERT(mg_strcmp(caps[2], mg_str("")) == 0);
+
+    ASSERT(mg_match(mg_str("a#c"), mg_str("?#"), caps) == true);
+    ASSERT(mg_strcmp(caps[0], mg_str("a")) == 0);
+    ASSERT(mg_strcmp(caps[1], mg_str("#c")) == 0);
+    ASSERT(mg_strcmp(caps[2], mg_str("")) == 0);
+
+    ASSERT(mg_match(mg_str("a*c"), mg_str("?*"), caps) == true);
+    ASSERT(mg_strcmp(caps[0], mg_str("a")) == 0);
+    ASSERT(mg_strcmp(caps[1], mg_str("*c")) == 0);
+    ASSERT(mg_strcmp(caps[2], mg_str("")) == 0);
   }
 }
 
@@ -856,6 +866,53 @@ static void eh9(struct mg_connection *c, int ev, void *ev_data) {
   (void) c;
 }
 
+struct fpr_data {
+  char *buf;
+  int len, reqs, closed;
+};
+
+static void fprcb(struct mg_connection *c, int ev, void *ev_data) {
+  struct fpr_data *fd = (struct fpr_data *) c->fn_data;
+  if (ev == MG_EV_HTTP_MSG) {
+    struct mg_http_message *hm = (struct mg_http_message *) ev_data;
+    int code = atoi(hm->uri.buf);
+    if (code == 200) {
+      snprintf(fd->buf + fd->len, FETCH_BUF_SIZE - (unsigned int) fd->len, "%.*s", (int) hm->message.len,
+               hm->message.buf);
+      fd->len += (int) hm->message.len;
+      ++fd->reqs;
+      if(fd->reqs == 2) {
+        fd->closed = 1;
+        c->is_closing = 1;
+      }
+    } else { // allow testing for other codes and catching wrong responses
+      MG_INFO(("reqs: %d, code: %d", fd->reqs, code));
+      fd->reqs += code;
+    }
+    (void) c;
+  } else if (ev == MG_EV_CLOSE) {
+    fd->closed = 1;
+  }
+}
+
+static int fpr(struct mg_mgr *mgr, char *buf, const char *url,
+                 const char *fmt, ...) {
+  struct fpr_data fd = {buf, 0, 0, 0};
+  int i;
+  struct mg_connection *c = NULL;
+  va_list ap;
+  c = mg_http_connect(mgr, url, fprcb, &fd);
+  ASSERT(c != NULL);
+  va_start(ap, fmt);
+  mg_vprintf(c, fmt, &ap);
+  va_end(ap);
+  buf[0] = '\0';
+  for (i = 0; i < 500 && !fd.closed; i++) mg_mgr_poll(mgr, 1);
+  if (!fd.closed) c->is_closing = 1;
+  mg_mgr_poll(mgr, 1);
+  return fd.reqs;
+}
+
 static void test_http_server(void) {
   struct mg_mgr mgr;
   const char *url = "http://127.0.0.1:12346";
@@ -868,11 +925,24 @@ static void test_http_server(void) {
   ASSERT(cmpbody(buf, "hello\n") == 0);
   ASSERT(cmpheader(buf, "C", "D"));
 
-  // Invalid header: failure
-  ASSERT(fetch(&mgr, buf, url, "GET /a.txt HTTP/1.0\nA B\n\n") == 0);
+  ASSERT(fetch(&mgr, buf, url, "GET /a.txt HTTP/1.0\nA:\tB\n\n") == 200);
+  ASSERT(cmpbody(buf, "hello\n") == 0);
+  ASSERT(cmpheader(buf, "A", "B") == 0);
 
   ASSERT(fetch(&mgr, buf, url, "GET /%%61.txt HTTP/1.0\n\n") == 200);
   ASSERT(cmpbody(buf, "hello\n") == 0);
+
+  // Invalid header: failure
+  ASSERT(fetch(&mgr, buf, url, "GET /a.txt HTTP/1.0\nA B\n\n") == 0);
+
+  // Pipelined requests
+  ASSERT(fpr(&mgr, buf, url, "GET /foo/bar HTTP/1.1\n\nGET /foo/foobar HTTP/1.1\n\n") == 2);
+  // Pipelined requests with file requests other than the last one (see #2796)
+  ASSERT(fpr(&mgr, buf, url, "GET /a.txt HTTP/1.1\n\nGET /a.txt HTTP/1.1\n\n") == 2);
+  ASSERT(fpr(&mgr, buf, url, "HEAD /a.txt HTTP/1.1\n\nGET /a.txt HTTP/1.1\n\n") == 2);
+  // Connection: close
+  ASSERT(fpr(&mgr, buf, url, "GET /foo/bar HTTP/1.1\nConnection: close\n\nGET /foo/foobar HTTP/1.1\n\n") == 1);
+  ASSERT(cmpbody(buf, "uri: bar") == 0);
 
   // Responses with missing reason phrase must also work
   ASSERT(fetch(&mgr, buf, url, "GET /no_reason HTTP/1.0\n\n") == 200);
@@ -1378,6 +1448,8 @@ static void test_http_no_content_length(void) {
   ASSERT(fetch(&mgr, buf, url, "HTTP/1.1 304\r\n\r\n") != 411);
   ASSERT(fetch(&mgr, buf, url, "HTTP/1.1 305\r\n\r\n") == 411);
   ASSERT(fetch(&mgr, buf, url, post_req) != 411);
+  // Check it is processed only once (see #2811)
+  ASSERT(fpr(&mgr, buf, url, "POST / HTTP/1.1\r\n\r\n") == 411);
   mg_mgr_free(&mgr);
   ASSERT(mgr.conns == NULL);
 }
@@ -1612,6 +1684,22 @@ static void test_http_parse(void) {
     ASSERT(vcmp(*v, "\xc0"));
     s = "a b\n\xc0: 2\n\n";  // Invalid UTF in the header name: do NOT accept
     ASSERT(mg_http_parse(s, strlen(s), &hm) == -1);
+  }
+
+  {
+    struct mg_http_message hm;
+    const char *s;
+    s = "a b c\nd:e\n\n";
+    ASSERT(mg_http_parse(s, strlen(s), &hm) == (int) strlen(s));
+    s = "a b c\nd: e\n\n";
+    ASSERT(mg_http_parse(s, strlen(s), &hm) == (int) strlen(s));
+    s = "a b c\nd:\te\n\n";
+    ASSERT(mg_http_parse(s, strlen(s), &hm) == (int) strlen(s));
+    s = "a b c\nd:\t e\n\n";
+    ASSERT(mg_http_parse(s, strlen(s), &hm) == (int) strlen(s));
+    s = "a b c\nd: \te\t \n\n";
+    ASSERT(mg_http_parse(s, strlen(s), &hm) == (int) strlen(s));
+    ASSERT(mg_strcmp(hm.headers[0].value, mg_str("e")) == 0);
   }
 }
 
@@ -1854,6 +1942,12 @@ static bool chkdbl(struct mg_str s, double val) {
 }
 
 static void test_str(void) {
+  {
+    struct mg_str s = mg_strdup(mg_str("a"));
+    ASSERT(mg_strcmp(s, mg_str("a")) == 0);
+    free((void *) s.buf);
+  }
+
   {
     const char *s;
     struct mg_str a = mg_str("hello"), b = mg_str("a"), c = mg_str(NULL);
@@ -2355,7 +2449,8 @@ static void test_util(void) {
   {
     uint32_t val, max = (uint32_t) -1;
     ASSERT(mg_str_to_num(mg_str("123"), 10, &val, sizeof(uint32_t)) && val == 123);
-    mg_snprintf(buf, sizeof(buf), "%lu", max);
+    mg_snprintf(buf, sizeof(buf), "%lu", (unsigned long) max);
+    ASSERT(strcmp(buf, "4294967295") == 0);
     ASSERT(mg_str_to_num(mg_str(buf), 10, &val, sizeof(uint32_t)) && val == max);
     ASSERT(mg_str_to_num(mg_str("01111011"), 2, &val, sizeof(uint32_t)) && val == 123);
     ASSERT(mg_str_to_num(mg_str("11111111111111111111111111111111"), 2, &val, sizeof(uint32_t)) && val == max);

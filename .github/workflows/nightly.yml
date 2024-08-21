@@ -13,7 +13,7 @@ jobs:
       fail-fast: false
       matrix:
         cc: [gcc, clang, g++, clang++]
-        target: [test, mip_test]
+        target: [test]
         ssl: ["", BUILTIN, MBEDTLS, OPENSSL, WOLFSSL]
         select: ["-DMG_ENABLE_POLL=0 -DMG_ENABLE_EPOLL=0", "-DMG_ENABLE_POLL=1 -DMG_ENABLE_EPOLL=0", "-DMG_ENABLE_POLL=0 -DMG_ENABLE_EPOLL=1"]
         exclude:
@@ -37,7 +37,23 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with: { fetch-depth: 2 }
-    - run: ./test/setup_ga_network.sh && sudo apt -y update ; sudo apt -y install libmbedtls-dev libwolfssl-dev && make -C test ${{ matrix.target }}
+    - run: sudo apt -y update ; sudo apt -y install libmbedtls-dev libwolfssl-dev && make -C test ${{ matrix.target }}
+  mip:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang, g++, clang++]
+        target: [mip_test, mip_tap_test]
+        ssl: ["", BUILTIN, MBEDTLS, OPENSSL, WOLFSSL]
+    name: ${{ matrix.target }} CC=${{ matrix.cc }} SSL=${{ matrix.ssl }}
+    env:
+      CC: ${{ matrix.cc }}
+      SSL: ${{ matrix.ssl }}
+    steps:
+    - uses: actions/checkout@v4
+      with: { fetch-depth: 2 }
+    - run: if [ "${{ matrix.target }}" == "mip_tap_test" ]; then ./test/setup_ga_network.sh ; fi && sudo apt -y update ; sudo apt -y install libmbedtls-dev libwolfssl-dev && make -C test ${{ matrix.target }} IPV6=0
   s390:
     runs-on: ubuntu-latest
     strategy:
@@ -369,12 +385,16 @@ jobs:
       matrix:
         ssl: ["", -DMG_TLS=MG_TLS_BUILTIN]
         example:
+          - path: infineon/infineon-xmc7200
           - path: microchip/same54-xpro/device-dashboard
           - path: nxp/rt1020-evk-make-baremetal-builtin
           - path: nxp/rt1020-evk-make-freertos-builtin
+          - path: nxp/frdm-mcxn947-make-baremetal-builtin
+          - path: nxp/frdm-mcxn947-make-freertos-builtin
           - path: nxp/rt1060-evk-make-baremetal-builtin
           - path: nxp/rt1060-evk-make-freertos-builtin
           - path: nxp/rt1170-evk-make-baremetal-builtin
+          - path: nxp/rt1170-evk-make-freertos-builtin
           - path: renesas/ek-ra6m4-make-baremetal-builtin
           - path: rp2040/pico-rndis-dashboard
           - path: rp2040/pico-w
@@ -578,7 +598,7 @@ jobs:
     - name: baremetal
       run: sudo apt -y update && sudo apt -y install gcc-arm-none-eabi
     - run: make -C examples/nxp/rt1170-evk-make-baremetal-builtin test VCON_API_KEY=${{secrets.VCON_API_KEY}}
-#    - run: make -C examples/nxp/rt1170-evk-make-freertos-builtin test VCON_API_KEY=${{secrets.VCON_API_KEY}}
+    - run: make -C examples/nxp/rt1170-evk-make-freertos-builtin test VCON_API_KEY=${{secrets.VCON_API_KEY}}
 
   test_ra6m4:
     runs-on: ubuntu-latest
