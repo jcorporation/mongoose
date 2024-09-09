@@ -10,7 +10,7 @@
 #include "mongoose.h"
 
 // The very first web page in history. You can replace it from command line
-static const char *s_url = "http://info.cern.ch/";
+static const char *s_url = "https://jcorporation.github.io/webradiodb/db/pics/http___stream_dandelionradio_com_9414.webp";
 static const char *s_post_data = NULL;      // POST data
 static const uint64_t s_timeout_ms = 1500;  // Connect timeout in milliseconds
 
@@ -29,7 +29,7 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
     struct mg_str host = mg_url_host(s_url);
 
     if (mg_url_is_ssl(s_url)) {
-      struct mg_tls_opts opts = {.ca = mg_unpacked("/certs/ca.pem"),
+      struct mg_tls_opts opts = {//.ca = mg_unpacked("/certs/ca.pem"),
                                  .name = mg_url_host(s_url)};
       mg_tls_init(c, &opts);
     }
@@ -48,7 +48,9 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
   } else if (ev == MG_EV_HTTP_MSG) {
     // Response is received. Print it
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-    printf("%.*s", (int) hm->message.len, hm->message.buf);
+    //printf("%.*s", (int) hm->message.len, hm->message.buf);
+    const struct mg_str *content_length = mg_http_get_header(hm, "Content-Length");
+    printf("Content-Length: %.*s, Received: %lu\n", (int)content_length->len, content_length->buf, hm->body.len);
     c->is_draining = 1;        // Tell mongoose to close this connection
     *(bool *) c->fn_data = true;  // Tell event loop to stop
   } else if (ev == MG_EV_ERROR) {
