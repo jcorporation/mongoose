@@ -173,6 +173,67 @@ jobs:
     - run: make -C test clean_tutorials_mac
 
 
+#  wizard_examples:
+#    runs-on: ubuntu-latest
+#    strategy:
+#      fail-fast: false
+#      matrix:
+#        example:
+#          - path: esp32/esp32-idf
+#    name: ${{ matrix.example.path }}
+#    env:
+#      GO: 0
+#    steps:
+#      - uses: actions/checkout@v4
+#        with: { fetch-depth: 2 }
+#      - run: |
+#          if ./test/match_changed_files.sh '^src'; then
+#            echo GO=1 >> $GITHUB_ENV
+#            # nothing specific to install or do
+#          fi
+#      - if: ${{ env.GO == 1 }}
+#        run: make -C examples/${{ matrix.example.path }} build
+
+  wizard_examples_arm:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        example:
+          - path: nxp/frdm-mcxn947-make-baremetal-builtin
+          - path: nxp/frdm-mcxn947-make-freertos-builtin
+          - path: nxp/rt1020-evk-make-baremetal-builtin
+          - path: nxp/rt1060-evk-make-baremetal-builtin
+          - path: nxp/rt1170-evk-make-baremetal-builtin
+          - path: stm32/nucleo-f429zi-make-baremetal-builtin
+          - path: stm32/nucleo-f429zi-make-freertos-builtin
+          - path: stm32/nucleo-f746zg-make-baremetal-builtin
+          - path: stm32/nucleo-f746zg-make-freertos-builtin
+          - path: stm32/nucleo-h563zi-make-baremetal-builtin
+          - path: stm32/nucleo-h563zi-make-freertos-builtin
+          - path: stm32/nucleo-h723zg-make-baremetal-builtin
+          - path: stm32/nucleo-h723zg-make-freertos-builtin
+          - path: stm32/nucleo-h743zi-make-baremetal-builtin
+          - path: stm32/nucleo-h743zi-make-freertos-builtin
+          - path: stm32/stm32h573i-dk-make-baremetal-builtin
+          - path: stm32/stm32h573i-dk-make-freertos-builtin
+          - path: ti/ek-tm4c1294xl-make-baremetal-builtin
+          - path: ti/ek-tm4c1294xl-make-freertos-builtin
+    name: ${{ matrix.example.path }}
+    env:
+      GO: 0
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 2 }
+      - run: |
+          if ./test/match_changed_files.sh '^src'; then
+            echo GO=1 >> $GITHUB_ENV
+            sudo apt -y update && sudo apt -y install gcc-arm-none-eabi
+          fi
+      - if: ${{ env.GO == 1 }}
+        run: make -C examples/${{ matrix.example.path }} build
+
+
   generic_examples:
     runs-on: ubuntu-latest
     strategy:
@@ -243,33 +304,15 @@ jobs:
         example:
           - path: infineon/infineon-xmc7200
           - path: microchip/same54-xpro/device-dashboard
-          - path: nxp/frdm-mcxn947-make-baremetal-builtin
-          - path: nxp/frdm-mcxn947-make-freertos-builtin
-          - path: nxp/rt1020-evk-make-baremetal-builtin
           - path: nxp/rt1020-evk-make-freertos-builtin
-          - path: nxp/rt1060-evk-make-baremetal-builtin
           - path: nxp/rt1060-evk-make-freertos-builtin
-          - path: nxp/rt1170-evk-make-baremetal-builtin
           - path: nxp/rt1170-evk-make-freertos-builtin
           - path: renesas/ek-ra6m4-make-baremetal-builtin
           - path: rp2040/pico-rndis-dashboard
           - path: rp2040/pico-w
           - path: rp2040/pico-w5500
-          - path: stm32/nucleo-f429zi-make-baremetal-builtin
-          - path: stm32/nucleo-f429zi-make-freertos-builtin
-          - path: stm32/nucleo-f746zg-make-baremetal-builtin
-          - path: stm32/nucleo-f746zg-make-freertos-builtin
           - path: stm32/nucleo-f746zg-make-freertos-tcp
           - path: stm32/nucleo-f746zg-make-baremetal-builtin-cmsis_driver
-          - path: stm32/nucleo-h563zi-make-baremetal-builtin
-          - path: stm32/nucleo-h563zi-make-freertos-builtin
-          - path: stm32/nucleo-h723zg-make-freertos-builtin
-          - path: stm32/nucleo-h743zi-make-baremetal-builtin
-          - path: stm32/nucleo-h743zi-make-freertos-builtin
-          - path: stm32/stm32h573i-dk-make-baremetal-builtin
-          - path: stm32/stm32h573i-dk-make-freertos-builtin
-          - path: ti/ek-tm4c1294xl-make-baremetal-builtin
-          - path: ti/ek-tm4c1294xl-make-freertos-builtin
     name: ${{ matrix.example.path }}
     env:
       GO: 0
@@ -326,64 +369,6 @@ jobs:
       - if: ${{ env.GO == 1 }}
         run: make -C examples/${{ matrix.example.path }} build
       
-#  dual_examples:
-#    runs-on: ubuntu-latest
-#    strategy:
-#      fail-fast: false
-#      matrix:
-#        example:
-#          - path: 
-#    name: ${{ matrix.example.path }}
-#    env:
-#      GO: 0
-#    steps:
-#      - uses: actions/checkout@v4
-#        with: { fetch-depth: 2 }
-#      - run: |
-#          if ./test/match_changed_files.sh '^src|examples/device-dashboard|examples/mqtt-dashboard/device|^examples/${{ matrix.example.path }}'; then
-#            echo GO=1 >> $GITHUB_ENV
-#            # nothing specific to install or do
-#          fi
-#      - if: ${{ env.GO == 1 }}
-#        run: |
-#          if ./test/match_changed_files.sh '^src|examples/device-dashboard|^examples/${{ matrix.example.path }}'; then
-#            make -C examples/${{ matrix.example.path }} device_dashboard
-#          fi
-#      - if: ${{ env.GO == 1 }}
-#        run: |
-#          if ./test/match_changed_files.sh '^src|examples/mqtt-dashboard/device|^examples/${{ matrix.example.path }}'; then
-#            make -C examples/${{ matrix.example.path }} mqtt_dashboard
-#          fi
-
-  dual_examples_arm:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        example:
-          - path: stm32/nucleo-h723zg-make-baremetal-builtin
-    name: ${{ matrix.example.path }}
-    env:
-      GO: 0
-    steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 2 }
-      - run: |
-          if ./test/match_changed_files.sh '^src|examples/device-dashboard|examples/mqtt-dashboard/device|^examples/${{ matrix.example.path }}'; then
-            echo GO=1 >> $GITHUB_ENV
-            sudo apt -y update && sudo apt -y install gcc-arm-none-eabi
-          fi
-      - if: ${{ env.GO == 1 }}
-        run: |
-          if ./test/match_changed_files.sh '^src|examples/device-dashboard|^examples/${{ matrix.example.path }}'; then
-            make -C examples/${{ matrix.example.path }} device_dashboard
-          fi
-      - if: ${{ env.GO == 1 }}
-        run: |
-          if ./test/match_changed_files.sh '^src|examples/mqtt-dashboard/device|^examples/${{ matrix.example.path }}'; then
-            make -C examples/${{ matrix.example.path }} mqtt_dashboard
-          fi
-
   cube_examples:
     runs-on: ubuntu-latest
     env:
@@ -394,7 +379,7 @@ jobs:
       - run: |
           if ./test/match_changed_files.sh '^src|examples/stm32/nucleo-*-cube-*'; then
             echo GO=1 >> $GITHUB_ENV
-            # nothing specific to install or do
+            sudo pip install yq
           fi
       - if: ${{ env.GO == 1 }}
         run: cd test/cube && make
@@ -436,16 +421,16 @@ jobs:
           echo GO=1 >> $GITHUB_ENV
           # nothing specific to install or do
         fi
-    - if: ${{ env.GO == 1 }}
-      run: |
-        if ./test/match_changed_files.sh 'examples/stm32/nucleo-f746zg-cube-baremetal-builtin'; then
-          make -C test/cube test PROJECTS=../../examples/stm32/nucleo-f746zg-cube-baremetal-builtin VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=5
-        fi
-    - if: ${{ env.GO == 1 }}
-      run: |
-        if ./test/match_changed_files.sh 'examples/stm32/nucleo-f746zg-cube-freertos-builtin'; then
-          make -C test/cube test PROJECTS=../../examples/stm32/nucleo-f746zg-cube-freertos-builtin VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=5    
-        fi
+#    - if: ${{ env.GO == 1 }}
+#      run: |
+#        if ./test/match_changed_files.sh 'examples/stm32/nucleo-f746zg-cube-baremetal-builtin'; then
+#          make -C test/cube test PROJECTS=../../examples/stm32/nucleo-f746zg-cube-baremetal-builtin VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=5
+#        fi
+#    - if: ${{ env.GO == 1 }}
+#      run: |
+#        if ./test/match_changed_files.sh 'examples/stm32/nucleo-f746zg-cube-freertos-builtin'; then
+#          make -C test/cube test PROJECTS=../../examples/stm32/nucleo-f746zg-cube-freertos-builtin VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=5    
+#        fi
     - if: ${{ env.GO == 1 }}
       run: |
         if ./test/match_changed_files.sh 'examples/stm32/nucleo-f746zg-cube-freertos-lwip'; then
@@ -484,16 +469,16 @@ jobs:
           echo GO=1 >> $GITHUB_ENV
           # nothing specific to install or do
         fi
-    - if: ${{ env.GO == 1 }}
-      run: |
-        if ./test/match_changed_files.sh 'examples/stm32/nucleo-f429zi-cube-baremetal-builtin'; then
-          make -C test/cube test PROJECTS=../../examples/stm32/nucleo-f429zi-cube-baremetal-builtin VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=2
-        fi
-    - if: ${{ env.GO == 1 }}
-      run: |
-        if ./test/match_changed_files.sh 'examples/stm32/nucleo-f429zi-cube-freertos-builtin'; then
-          make -C test/cube test PROJECTS=../../examples/stm32/nucleo-f429zi-cube-freertos-builtin VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=2
-        fi
+#    - if: ${{ env.GO == 1 }}
+#      run: |
+#        if ./test/match_changed_files.sh 'examples/stm32/nucleo-f429zi-cube-baremetal-builtin'; then
+#          make -C test/cube test PROJECTS=../../examples/stm32/nucleo-f429zi-cube-baremetal-builtin VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=2
+#        fi
+#    - if: ${{ env.GO == 1 }}
+#      run: |
+#        if ./test/match_changed_files.sh 'examples/stm32/nucleo-f429zi-cube-freertos-builtin'; then
+#          make -C test/cube test PROJECTS=../../examples/stm32/nucleo-f429zi-cube-freertos-builtin VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=2
+#        fi
     - if: ${{ env.GO == 1 }}
       run: |
         if ./test/match_changed_files.sh 'examples/stm32/nucleo-f429zi-cube-freertos-lwip'; then
@@ -524,23 +509,23 @@ jobs:
         if ./test/match_changed_files.sh 'examples/stm32/nucleo-h743zi-make-freertos-builtin'; then
           make -C examples/stm32/nucleo-h743zi-make-freertos-builtin test VCON_API_KEY=${{secrets.VCON_API_KEY}}
         fi
-    - name: Cube
-      run: |
-        echo GO=0 >> $GITHUB_ENV
-        if ./test/match_changed_files.sh 'examples/stm32/nucleo-h74.*-cube-'; then
-          echo GO=1 >> $GITHUB_ENV
-          # nothing specific to install or do
-        fi
-    - if: ${{ env.GO == 1 }}
-      run: |
-        if ./test/match_changed_files.sh 'examples/stm32/nucleo-h743zi-cube-baremetal-builtin'; then
-          make -C test/cube test PROJECTS=../../examples/stm32/nucleo-h743zi-cube-baremetal-builtin VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=6
-        fi
-    - if: ${{ env.GO == 1 }}
-      run: |
-        if ./test/match_changed_files.sh 'examples/stm32/nucleo-h743zi-cube-freertos-builtin'; then
-          make -C test/cube test PROJECTS=../../examples/stm32/nucleo-h743zi-cube-freertos-builtin VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=6
-        fi
+#    - name: Cube
+#      run: |
+#        echo GO=0 >> $GITHUB_ENV
+#        if ./test/match_changed_files.sh 'examples/stm32/nucleo-h74.*-cube-'; then
+#          echo GO=1 >> $GITHUB_ENV
+#          # nothing specific to install or do
+#        fi
+#    - if: ${{ env.GO == 1 }}
+#      run: |
+#        if ./test/match_changed_files.sh 'examples/stm32/nucleo-h743zi-cube-baremetal-builtin'; then
+#          make -C test/cube test PROJECTS=../../examples/stm32/nucleo-h743zi-cube-baremetal-builtin VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=6
+#        fi
+#    - if: ${{ env.GO == 1 }}
+#      run: |
+#        if ./test/match_changed_files.sh 'examples/stm32/nucleo-h743zi-cube-freertos-builtin'; then
+#          make -C test/cube test PROJECTS=../../examples/stm32/nucleo-h743zi-cube-freertos-builtin VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=6
+#        fi
 
   test_h723:
     runs-on: ubuntu-latest

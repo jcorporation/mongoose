@@ -42,6 +42,7 @@ extern "C" {
 #define MG_ARCH_ARMCC 12        // Keil MDK-Core with Configuration Wizard
 #define MG_ARCH_CMSIS_RTOS2 13  // CMSIS-RTOS API v2 (Keil RTX5, FreeRTOS)
 #define MG_ARCH_RTTHREAD 14     // RT-Thread RTOS
+#define MG_ARCH_ARMCGT 15       // Texas Semi ARM-CGT
 
 #if !defined(MG_ARCH)
 #if defined(__unix__) || defined(__APPLE__)
@@ -74,6 +75,25 @@ extern "C" {
 
 
 
+
+
+#if MG_ARCH == MG_ARCH_ARMCGT
+
+#include <ctype.h>
+#include <errno.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/types.h>
+#include <time.h>
+
+#define MG_PATH_MAX 100
+#define MG_ENABLE_SOCKET 0
+#define MG_ENABLE_DIRLIST 0
+
+#endif
 
 
 #if MG_ARCH == MG_ARCH_AZURERTOS
@@ -178,10 +198,6 @@ extern "C" {
 
 #include <FreeRTOS.h>
 #include <task.h>
-
-#ifndef MG_IO_SIZE
-#define MG_IO_SIZE 512
-#endif
 
 #define calloc(a, b) mg_calloc(a, b)
 #define free(a) vPortFree(a)
@@ -390,6 +406,10 @@ static inline int mg_mkdir(const char *path, mode_t mode) {
 #define MG_ENABLE_POSIX_FS 1
 #endif
 
+#ifndef MG_IO_SIZE
+#define MG_IO_SIZE 16384
+#endif
+
 #endif
 
 
@@ -443,6 +463,20 @@ typedef enum { false = 0, true = 1 } bool;
 #include <winerror.h>
 #include <winsock2.h>
 
+// For mg_random()
+#if defined(_MSC_VER) && _MSC_VER < 1700
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x400  // Let vc98 pick up wincrypt.h
+#endif
+#include <wincrypt.h>
+#pragma comment(lib, "advapi32.lib")
+#else
+#include <bcrypt.h>
+#if defined(_MSC_VER) 
+#pragma comment(lib, "bcrypt.lib")
+#endif
+#endif
+
 // Protect from calls like std::snprintf in app code
 // See https://github.com/cesanta/mongoose/issues/1047
 #ifndef __cplusplus
@@ -487,12 +521,12 @@ typedef int socklen_t;
   (((errcode) < 0) && (WSAGetLastError() == WSAECONNRESET))
 
 #define realpath(a, b) _fullpath((b), (a), MG_PATH_MAX)
-#define sleep(x) Sleep((x) *1000)
+#define sleep(x) Sleep((x) * 1000)
 #define mkdir(a, b) _mkdir(a)
 #define timegm(x) _mkgmtime(x)
 
 #ifndef S_ISDIR
-#define S_ISDIR(x) (((x) &_S_IFMT) == _S_IFDIR)
+#define S_ISDIR(x) (((x) & _S_IFMT) == _S_IFDIR)
 #endif
 
 #ifndef MG_ENABLE_DIRLIST
@@ -505,6 +539,10 @@ typedef int socklen_t;
 
 #ifndef MG_ENABLE_POSIX_FS
 #define MG_ENABLE_POSIX_FS 1
+#endif
+
+#ifndef MG_IO_SIZE
+#define MG_IO_SIZE 16384
 #endif
 
 #endif
@@ -754,7 +792,7 @@ struct timeval {
 #endif
 
 #ifndef MG_IO_SIZE
-#define MG_IO_SIZE 2048  // Granularity of the send/recv IO buffer growth
+#define MG_IO_SIZE 256  // Granularity of the send/recv IO buffer growth
 #endif
 
 #ifndef MG_MAX_RECV_SIZE
@@ -1052,7 +1090,7 @@ struct mg_str mg_unpacked(const char *path);  // Packed file as mg_str
 #endif
 
 void mg_bzero(volatile unsigned char *buf, size_t len);
-void mg_random(void *buf, size_t len);
+bool mg_random(void *buf, size_t len);
 char *mg_random_str(char *buf, size_t len);
 uint16_t mg_ntohs(uint16_t net);
 uint32_t mg_ntohl(uint32_t net);
@@ -2681,6 +2719,7 @@ void mg_device_reset(void);  // Reboot device immediately
 
 #if defined(MG_ENABLE_TCPIP) && MG_ENABLE_TCPIP
 struct mg_tcpip_if;  // Mongoose TCP/IP network interface
+#define MG_TCPIP_IFACE(mgr_) ((struct mg_tcpip_if *) (mgr_)->priv)
 
 struct mg_tcpip_driver {
   bool (*init)(struct mg_tcpip_if *);                         // Init driver
@@ -2898,10 +2937,10 @@ struct mg_phy {
 
 // PHY configuration settings, bitmask
 enum {
-  MG_PHY_LEDS_ACTIVE_HIGH =
-      (1 << 0),  // Set if PHY LEDs are connected to ground
-  MG_PHY_CLOCKS_MAC =
-      (1 << 1)   // Set when PHY clocks MAC. Otherwise, MAC clocks PHY
+  // Set if PHY LEDs are connected to ground
+  MG_PHY_LEDS_ACTIVE_HIGH = (1 << 0),
+  // Set when PHY clocks MAC. Otherwise, MAC clocks PHY
+  MG_PHY_CLOCKS_MAC = (1 << 1),
 };
 
 enum { MG_PHY_SPEED_10M, MG_PHY_SPEED_100M, MG_PHY_SPEED_1000M };
@@ -3011,6 +3050,10 @@ struct mg_tcpip_driver_stm32h_data {
   uint8_t phy_conf;  // PHY config
 };
 
+#ifndef MG_TCPIP_PHY_CONF
+#define MG_TCPIP_PHY_CONF MG_PHY_CLOCKS_MAC
+#endif
+
 #ifndef MG_TCPIP_PHY_ADDR
 #define MG_TCPIP_PHY_ADDR 0
 #endif
@@ -3025,6 +3068,7 @@ struct mg_tcpip_driver_stm32h_data {
     static struct mg_tcpip_if mif_;                               \
     driver_data_.mdc_cr = MG_DRIVER_MDC_CR;                       \
     driver_data_.phy_addr = MG_TCPIP_PHY_ADDR;                    \
+    driver_data_.phy_conf = MG_TCPIP_PHY_CONF;                    \
     mif_.ip = MG_TCPIP_IP;                                        \
     mif_.mask = MG_TCPIP_MASK;                                    \
     mif_.gw = MG_TCPIP_GW;                                        \

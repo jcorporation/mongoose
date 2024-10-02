@@ -1,7 +1,7 @@
-#include "http.h"
 #include "arch.h"
 #include "base64.h"
 #include "fmt.h"
+#include "http.h"
 #include "json.h"
 #include "log.h"
 #include "net.h"
@@ -521,7 +521,7 @@ static struct mg_str s_known_types[] = {
 // clang-format on
 
 static struct mg_str guess_content_type(struct mg_str path, const char *extra) {
-  struct mg_str entry, k, v, s = mg_str(extra);
+  struct mg_str entry, k, v, s = mg_str(extra), asterisk = mg_str_n("*", 1);
   size_t i = 0;
 
   // Shrink path to its extension only
@@ -531,7 +531,9 @@ static struct mg_str guess_content_type(struct mg_str path, const char *extra) {
 
   // Process user-provided mime type overrides, if any
   while (mg_span(s, &entry, &s, ',')) {
-    if (mg_span(entry, &k, &v, '=') && mg_strcmp(path, k) == 0) return v;
+    if (mg_span(entry, &k, &v, '=') &&
+        (mg_strcmp(asterisk, k) == 0 || mg_strcmp(path, k) == 0))
+      return v;
   }
 
   // Process built-in mime types
@@ -1007,6 +1009,7 @@ static void http_cb(struct mg_connection *c, int ev, void *ev_data) {
       int n = mg_http_parse(buf, c->recv.len - ofs, &hm);
       struct mg_str *te;  // Transfer - encoding header
       bool is_chunked = false;
+      size_t old_len = c->recv.len;
       if (n < 0) {
         // We don't use mg_error() here, to avoid closing pipelined requests
         // prematurely, see #2592
@@ -1018,6 +1021,12 @@ static void http_cb(struct mg_connection *c, int ev, void *ev_data) {
       }
       if (n == 0) break;                 // Request is not buffered yet
       mg_call(c, MG_EV_HTTP_HDRS, &hm);  // Got all HTTP headers
+      if (c->recv.len != old_len) {
+        // User manipulated received data. Wash our hands
+        MG_DEBUG(("%lu detaching HTTP handler", c->id));
+        c->pfn = NULL;
+        return;
+      }
       if (ev == MG_EV_CLOSE) {           // If client did not set Content-Length
         hm.message.len = c->recv.len - ofs;  // and closes now, deliver MSG
         hm.body.len = hm.message.len - (size_t) (hm.body.buf - hm.message.buf);

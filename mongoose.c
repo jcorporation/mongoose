@@ -2737,7 +2737,7 @@ static struct mg_str s_known_types[] = {
 // clang-format on
 
 static struct mg_str guess_content_type(struct mg_str path, const char *extra) {
-  struct mg_str entry, k, v, s = mg_str(extra);
+  struct mg_str entry, k, v, s = mg_str(extra), asterisk = mg_str_n("*", 1);
   size_t i = 0;
 
   // Shrink path to its extension only
@@ -2747,7 +2747,9 @@ static struct mg_str guess_content_type(struct mg_str path, const char *extra) {
 
   // Process user-provided mime type overrides, if any
   while (mg_span(s, &entry, &s, ',')) {
-    if (mg_span(entry, &k, &v, '=') && mg_strcmp(path, k) == 0) return v;
+    if (mg_span(entry, &k, &v, '=') &&
+        (mg_strcmp(asterisk, k) == 0 || mg_strcmp(path, k) == 0))
+      return v;
   }
 
   // Process built-in mime types
@@ -3223,6 +3225,7 @@ static void http_cb(struct mg_connection *c, int ev, void *ev_data) {
       int n = mg_http_parse(buf, c->recv.len - ofs, &hm);
       struct mg_str *te;  // Transfer - encoding header
       bool is_chunked = false;
+      size_t old_len = c->recv.len;
       if (n < 0) {
         // We don't use mg_error() here, to avoid closing pipelined requests
         // prematurely, see #2592
@@ -3234,6 +3237,12 @@ static void http_cb(struct mg_connection *c, int ev, void *ev_data) {
       }
       if (n == 0) break;                 // Request is not buffered yet
       mg_call(c, MG_EV_HTTP_HDRS, &hm);  // Got all HTTP headers
+      if (c->recv.len != old_len) {
+        // User manipulated received data. Wash our hands
+        MG_DEBUG(("%lu detaching HTTP handler", c->id));
+        c->pfn = NULL;
+        return;
+      }
       if (ev == MG_EV_CLOSE) {           // If client did not set Content-Length
         hm.message.len = c->recv.len - ofs;  // and closes now, deliver MSG
         hm.body.len = hm.message.len - (size_t) (hm.body.buf - hm.message.buf);
@@ -4920,7 +4929,7 @@ void mg_mgr_init(struct mg_mgr *mgr) {
 #endif
 
 #define MIP_TCP_ACK_MS 150    // Timeout for ACKing
-#define MIP_TCP_ARP_MS 100    // Timeout for ARP response
+#define MIP_ARP_RESP_MS 100   // Timeout for ARP response
 #define MIP_TCP_SYN_MS 15000  // Timeout for connection establishment
 #define MIP_TCP_FIN_MS 1000   // Timeout for closing connection
 #define MIP_TCP_WIN 6000      // TCP window size
@@ -5081,7 +5090,7 @@ static void settmout(struct mg_connection *c, uint8_t type) {
   struct mg_tcpip_if *ifp = (struct mg_tcpip_if *) c->mgr->priv;
   struct connstate *s = (struct connstate *) (c + 1);
   unsigned n = type == MIP_TTYPE_ACK   ? MIP_TCP_ACK_MS
-               : type == MIP_TTYPE_ARP ? MIP_TCP_ARP_MS
+               : type == MIP_TTYPE_ARP ? MIP_ARP_RESP_MS
                : type == MIP_TTYPE_SYN ? MIP_TCP_SYN_MS
                : type == MIP_TTYPE_FIN ? MIP_TCP_FIN_MS
                                        : MIP_TCP_KEEPALIVE_MS;
@@ -5241,6 +5250,8 @@ static struct mg_connection *getpeer(struct mg_mgr *mgr, struct pkt *pkt,
   return c;
 }
 
+static void mac_resolved(struct mg_connection *c);
+
 static void rx_arp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   if (pkt->arp->op == mg_htons(1) && pkt->arp->tpa == ifp->ip) {
     // ARP request. Make a response, then send
@@ -5273,8 +5284,7 @@ static void rx_arp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
         MG_DEBUG(("%lu ARP resolved %M -> %M", c->id, mg_print_ip4, c->rem.ip,
                   mg_print_mac, s->mac));
         c->is_arplooking = 0;
-        send_syn(c);
-        settmout(c, MIP_TTYPE_SYN);
+        mac_resolved(c);
       }
     }
   }
@@ -5858,18 +5868,20 @@ static void mg_tcpip_poll(struct mg_tcpip_if *ifp, uint64_t now) {
 
   // Process timeouts
   for (c = ifp->mgr->conns; c != NULL; c = c->next) {
-    if (c->is_udp || c->is_listening || c->is_resolving) continue;
+    if ((c->is_udp && !c->is_arplooking) || c->is_listening || c->is_resolving) continue;
     struct connstate *s = (struct connstate *) (c + 1);
     uint32_t rem_ip;
     memcpy(&rem_ip, c->rem.ip, sizeof(uint32_t));
     if (now > s->timer) {
-      if (s->ttype == MIP_TTYPE_ACK && s->acked != s->ack) {
+      if (s->ttype == MIP_TTYPE_ARP) {
+        mg_error(c, "ARP timeout");
+      } else if (c->is_udp) {
+        continue;
+      } else if (s->ttype == MIP_TTYPE_ACK && s->acked != s->ack) {
         MG_VERBOSE(("%lu ack %x %x", c->id, s->seq, s->ack));
         tx_tcp(ifp, s->mac, rem_ip, TH_ACK, c->loc.port, c->rem.port,
                mg_htonl(s->seq), mg_htonl(s->ack), NULL, 0);
         s->acked = s->ack;
-      } else if (s->ttype == MIP_TTYPE_ARP) {
-        mg_error(c, "ARP timeout");
       } else if (s->ttype == MIP_TTYPE_SYN) {
         mg_error(c, "Connection timeout");
       } else if (s->ttype == MIP_TTYPE_FIN) {
@@ -5950,6 +5962,16 @@ static void send_syn(struct mg_connection *c) {
          0);
 }
 
+static void mac_resolved(struct mg_connection *c) {
+  if (c->is_udp) {
+    c->is_connecting = 0;
+    mg_call(c, MG_EV_CONNECT, NULL);
+  } else {
+    send_syn(c);
+    settmout(c, MIP_TTYPE_SYN);
+  }
+}
+
 void mg_connect_resolved(struct mg_connection *c) {
   struct mg_tcpip_if *ifp = (struct mg_tcpip_if *) c->mgr->priv;
   uint32_t rem_ip;
@@ -5961,9 +5983,11 @@ void mg_connect_resolved(struct mg_connection *c) {
   MG_DEBUG(("%lu %M -> %M", c->id, mg_print_ip_port, &c->loc, mg_print_ip_port,
             &c->rem));
   mg_call(c, MG_EV_RESOLVE, NULL);
+  c->is_connecting = 1;
   if (c->is_udp && (rem_ip == 0xffffffff || rem_ip == (ifp->ip | ~ifp->mask))) {
     struct connstate *s = (struct connstate *) (c + 1);
     memset(s->mac, 0xFF, sizeof(s->mac));  // global or local broadcast
+    mac_resolved(c);
   } else if (ifp->ip && ((rem_ip & ifp->mask) == (ifp->ip & ifp->mask)) &&
              rem_ip != ifp->gw) {  // skip if gw (onstatechange -> READY -> ARP)
     // If we're in the same LAN, fire an ARP lookup.
@@ -5971,23 +5995,17 @@ void mg_connect_resolved(struct mg_connection *c) {
     arp_ask(ifp, rem_ip);
     settmout(c, MIP_TTYPE_ARP);
     c->is_arplooking = 1;
-    c->is_connecting = 1;
   } else if ((*((uint8_t *) &rem_ip) & 0xE0) == 0xE0) {
     struct connstate *s = (struct connstate *) (c + 1);  // 224 to 239, E0 to EF
     uint8_t mcastp[3] = {0x01, 0x00, 0x5E};              // multicast group
     memcpy(s->mac, mcastp, 3);
     memcpy(s->mac + 3, ((uint8_t *) &rem_ip) + 1, 3);  // 23 LSb
     s->mac[3] &= 0x7F;
+    mac_resolved(c);
   } else {
     struct connstate *s = (struct connstate *) (c + 1);
     memcpy(s->mac, ifp->gwmac, sizeof(ifp->gwmac));
-    if (c->is_udp) {
-      mg_call(c, MG_EV_CONNECT, NULL);
-    } else {
-      send_syn(c);
-      settmout(c, MIP_TTYPE_SYN);
-      c->is_connecting = 1;
-    }
+    mac_resolved(c);
   }
 }
 
@@ -6063,6 +6081,9 @@ bool mg_send(struct mg_connection *c, const void *buf, size_t len) {
   memcpy(&rem_ip, c->rem.ip, sizeof(uint32_t));
   if (ifp->ip == 0 || ifp->state != MG_TCPIP_STATE_READY) {
     mg_error(c, "net down");
+  } else if (c->is_udp && (c->is_arplooking || c->is_resolving)) {
+    // Fail to send, no target MAC or IP
+    MG_VERBOSE(("still resolving..."));
   } else if (c->is_udp) {
     struct connstate *s = (struct connstate *) (c + 1);
     len = trim_len(c, len);  // Trimming length if necessary
@@ -7524,25 +7545,28 @@ static void read_conn(struct mg_connection *c) {
     if (c->is_tls) {
       // Do not read to the raw TLS buffer if it already has enough.
       // This is to prevent overflowing c->rtls if our reads are slow
+      long m;
       if (c->rtls.len < 16 * 1024 + 40) {  // TLS record, header, MAC, padding
         if (!ioalloc(c, &c->rtls)) return;
         n = recv_raw(c, (char *) &c->rtls.buf[c->rtls.len],
                      c->rtls.size - c->rtls.len);
-        if (n == MG_IO_ERR) {
-          if (c->rtls.len == 0 || c->is_io_err) {
-            // Close only when we have fully drained both rtls and TLS buffers
-            c->is_closing = 1;  // or there's nothing we can do about it.
-          } else {  // TLS buffer is capped to max record size, mark and
-            c->is_io_err = 1;  // give TLS a chance to process that.
-          }
-        } else {
-          if (n > 0) c->rtls.len += (size_t) n;
-          if (c->is_tls_hs) mg_tls_handshake(c);
-        }
+        if (n > 0) c->rtls.len += (size_t) n;
       }
-      n = c->is_tls_hs    ? (long) MG_IO_WAIT
-          : c->is_closing ? -1
-                          : mg_tls_recv(c, buf, len);
+      // there can still be > 16K from last iteration, always mg_tls_recv()
+      m = c->is_tls_hs ? (long) MG_IO_WAIT : mg_tls_recv(c, buf, len);
+      if (n == MG_IO_ERR) {
+        if (c->rtls.len == 0 || m < 0) {
+          // Close only when we have fully drained both rtls and TLS buffers
+          c->is_closing = 1;  // or there's nothing we can do about it.
+          m = -1;
+        } else { // see #2885
+          // TLS buffer is capped to max record size, even though, there can
+          // be more than one record, give TLS a chance to process them.
+        }
+      } else if (c->is_tls_hs) {
+        mg_tls_handshake(c);
+      }
+      n = m;
     } else {
       n = recv_raw(c, buf, len);
     }
@@ -9845,7 +9869,8 @@ static void mg_tls_encrypt(struct mg_connection *c, const uint8_t *msg,
 #if CHACHA20
   (void) tag;  // tag is only used in aes gcm
   {
-    uint8_t *enc = (uint8_t *) malloc(8192);
+    size_t maxlen = MG_IO_SIZE > 16384 ? 16384 : MG_IO_SIZE;
+    uint8_t *enc = (uint8_t *) calloc(1, maxlen + 256 + 1);
     if (enc == NULL) {
       mg_error(c, "TLS OOM");
       return;
@@ -9914,7 +9939,7 @@ static int mg_tls_recv_record(struct mg_connection *c) {
   nonce[11] ^= (uint8_t) ((seq) &255U);
 #if CHACHA20
   {
-    uint8_t *dec = (uint8_t *) malloc(msgsz);
+    uint8_t *dec = (uint8_t *) calloc(1, msgsz);
     size_t n;
     if (dec == NULL) {
       mg_error(c, "TLS OOM");
@@ -10063,7 +10088,7 @@ static void mg_tls_server_send_hello(struct mg_connection *c) {
   // calculate keyshare
   uint8_t x25519_pub[X25519_BYTES];
   uint8_t x25519_prv[X25519_BYTES];
-  mg_random(x25519_prv, sizeof(x25519_prv));
+  if (!mg_random(x25519_prv, sizeof(x25519_prv))) mg_error(c, "RNG"); 
   mg_tls_x25519(x25519_pub, x25519_prv, X25519_BASE_POINT, 1);
   mg_tls_x25519(tls->x25519_sec, x25519_prv, tls->x25519_cli, 1);
   mg_tls_hexdump("s x25519 sec", tls->x25519_sec, sizeof(tls->x25519_sec));
@@ -10289,12 +10314,12 @@ static void mg_tls_client_send_hello(struct mg_connection *c) {
   }
 
   // calculate keyshare
-  mg_random(tls->x25519_cli, sizeof(tls->x25519_cli));
+  if (!mg_random(tls->x25519_cli, sizeof(tls->x25519_cli))) mg_error(c, "RNG");
   mg_tls_x25519(x25519_pub, tls->x25519_cli, X25519_BASE_POINT, 1);
 
   // fill in the gaps: random + session ID + keyshare
-  mg_random(tls->session_id, sizeof(tls->session_id));
-  mg_random(tls->random, sizeof(tls->random));
+  if (!mg_random(tls->session_id, sizeof(tls->session_id))) mg_error(c, "RNG");
+  if (!mg_random(tls->random, sizeof(tls->random))) mg_error(c, "RNG");
   memmove(msg_client_hello + 11, tls->random, sizeof(tls->random));
   memmove(msg_client_hello + 44, tls->session_id, sizeof(tls->session_id));
   memmove(msg_client_hello + 94, x25519_pub, sizeof(x25519_pub));
@@ -10730,7 +10755,7 @@ void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
       c->is_client ? MG_TLS_STATE_CLIENT_START : MG_TLS_STATE_SERVER_START;
 
   tls->skip_verification = opts->skip_verification;
-  tls->send.align = MG_IO_SIZE;
+  //tls->send.align = MG_IO_SIZE;
 
   c->tls = tls;
   c->is_tls = c->is_tls_hs = 1;
@@ -10800,6 +10825,7 @@ long mg_tls_send(struct mg_connection *c, const void *buf, size_t len) {
   struct tls_data *tls = (struct tls_data *) c->tls;
   long n = MG_IO_WAIT;
   if (len > MG_IO_SIZE) len = MG_IO_SIZE;
+  if (len > 16384) len = 16384;
   mg_tls_encrypt(c, (const uint8_t *) buf, len, MG_TLS_APP_DATA);
   while (tls->send.len > 0 &&
          (n = mg_io_send(c, tls->send.buf, tls->send.len)) > 0) {
@@ -16333,6 +16359,7 @@ struct mg_str mg_url_pass(const char *url) {
 #endif
 
 
+
 // Not using memset for zeroing memory, cause it can be dropped by compiler
 // See https://github.com/cesanta/mongoose/pull/1265
 void mg_bzero(volatile unsigned char *buf, size_t len) {
@@ -16343,22 +16370,50 @@ void mg_bzero(volatile unsigned char *buf, size_t len) {
 
 #if MG_ENABLE_CUSTOM_RANDOM
 #else
-void mg_random(void *buf, size_t len) {
-  bool done = false;
+bool mg_random(void *buf, size_t len) {
+  bool success = false;
   unsigned char *p = (unsigned char *) buf;
 #if MG_ARCH == MG_ARCH_ESP32
   while (len--) *p++ = (unsigned char) (esp_random() & 255);
-  done = true;
+  success = true;
 #elif MG_ARCH == MG_ARCH_WIN32
+  static bool initialised = false;
+#if defined(_MSC_VER) && _MSC_VER < 1700
+  static HCRYPTPROV hProv;
+  // CryptGenRandom() implementation earlier than 2008 is weak, see
+  // https://en.wikipedia.org/wiki/CryptGenRandom
+  if (initialised == false) {
+    initialised = CryptAcquireContext(&hProv, NULL, NULL, PROV_RSA_FULL,
+                                      CRYPT_VERIFYCONTEXT);
+  }
+  if (initialised == true) {
+    success = CryptGenRandom(hProv, len, p);
+  }
+#else
+  // BCrypt is a "new generation" strong crypto API, so try it first
+  static BCRYPT_ALG_HANDLE hProv;
+  if (initialised == false &&
+      BCryptOpenAlgorithmProvider(&hProv, BCRYPT_RNG_ALGORITHM, NULL, 0) == 0) {
+    initialised = true;
+  }
+  if (initialised == true) {
+    success = BCryptGenRandom(hProv, p, (ULONG) len, 0) == 0;
+  }
+#endif
+
 #elif MG_ARCH == MG_ARCH_UNIX
   FILE *fp = fopen("/dev/urandom", "rb");
   if (fp != NULL) {
-    if (fread(buf, 1, len, fp) == len) done = true;
+    if (fread(buf, 1, len, fp) == len) success = true;
     fclose(fp);
   }
 #endif
   // If everything above did not work, fallback to a pseudo random generator
-  while (!done && len--) *p++ = (unsigned char) (rand() & 255);
+  if (success == false) {
+    MG_ERROR(("Weak RNG: using rand()"));
+    while (len--) *p++ = (unsigned char) (rand() & 255);
+  }
+  return success;
 }
 #endif
 
