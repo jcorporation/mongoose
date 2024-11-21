@@ -9,17 +9,16 @@ all: $(PROJECTS)
 	$(DOCKER) $(IMAGE) $(PATHTO)headless-build.sh -data workspace -removeAll workspace
 
 $(PROJECTS): FORCE
-	(make -C $@ && sudo make -C $@ clean) || $(DOCKER) $(IMAGE) $(PATHTO)headless-build.sh -data workspace -import $@ -cleanBuild $(@F)/$(TARGET)
+	(make -C $@ && make -C $@ clean) || ( \
+	COREDIRS=`find $@ -maxdepth 1 -name 'CM*' -print` && ( \
+	(test "$$COREDIRS" == "" && \
+	  PROJNAME=`xq -r .projectDescription.name $@/.project` && \
+	  $(DOCKER) $(IMAGE) $(PATHTO)headless-build.sh -data workspace -import $@ -cleanBuild $$PROJNAME/$(TARGET) ) || ( \
+	(test "$$COREDIRS" != "" && \
+	  for core in $$COREDIRS; do \
+	    DIR=`basename $$core` \
+	    PROJNAME=`xq -r .projectDescription.name $@/$$DIR/.project` && \
+	    $(DOCKER) $(IMAGE) $(PATHTO)headless-build.sh -data workspace -import $@/$$DIR -cleanBuild $$PROJNAME/$(TARGET) || exit 1; \
+	  done ))))
 
 FORCE:
-
-# Automated remote test. See https://vcon.io/automated-firmware-tests/
-URL ?= https://dash.vcon.io/api/v3/devices
-update: $(PROJECTS)
-	curl --fail-with-body -su :$(VCON_API_KEY) $(URL)/$(DEVICE)/ota --data-binary @$</$(TARGET)/firmware.bin
-
-test update: TARGET = Test
-test: update
-	curl --fail-with-body -su :$(VCON_API_KEY) $(URL)/$(DEVICE)/tx?t=5 | tee /tmp/output.txt
-	grep 'READY, IP:' /tmp/output.txt       # Check for network init
-#	grep 'MQTT connected' /tmp/output.txt   # Check for MQTT connection success

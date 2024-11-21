@@ -17,6 +17,9 @@ bool mg_random(void *buf, size_t len) {
 #if MG_ARCH == MG_ARCH_ESP32
   while (len--) *p++ = (unsigned char) (esp_random() & 255);
   success = true;
+#elif MG_ARCH == MG_ARCH_PICOSDK
+  while (len--) *p++ = (unsigned char) (get_rand_32() & 255);
+  success = true;
 #elif MG_ARCH == MG_ARCH_WIN32
   static bool initialised = false;
 #if defined(_MSC_VER) && _MSC_VER < 1700
@@ -31,15 +34,16 @@ bool mg_random(void *buf, size_t len) {
     success = CryptGenRandom(hProv, len, p);
   }
 #else
-  // BCrypt is a "new generation" strong crypto API, so try it first
-  static BCRYPT_ALG_HANDLE hProv;
-  if (initialised == false &&
-      BCryptOpenAlgorithmProvider(&hProv, BCRYPT_RNG_ALGORITHM, NULL, 0) == 0) {
-    initialised = true;
+  size_t i;
+  for (i = 0; i < len; i++) {
+    unsigned int rand_v;
+    if (rand_s(&rand_v) == 0) {
+      p[i] = (unsigned char)(rand_v & 255);
+    } else {
+      break;
+    }
   }
-  if (initialised == true) {
-    success = BCryptGenRandom(hProv, p, (ULONG) len, 0) == 0;
-  }
+  success = (i == len);
 #endif
 
 #elif MG_ARCH == MG_ARCH_UNIX
@@ -152,7 +156,7 @@ bool mg_path_is_sane(const struct mg_str path) {
 uint64_t mg_millis(void) {
 #if MG_ARCH == MG_ARCH_WIN32
   return GetTickCount();
-#elif MG_ARCH == MG_ARCH_RP2040
+#elif MG_ARCH == MG_ARCH_PICOSDK
   return time_us_64() / 1000;
 #elif MG_ARCH == MG_ARCH_ESP8266 || MG_ARCH == MG_ARCH_ESP32 || \
     MG_ARCH == MG_ARCH_FREERTOS

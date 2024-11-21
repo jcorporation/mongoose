@@ -322,42 +322,42 @@ jobs:
 #          fi
 #      - run: make -C examples/${{ matrix.example.path }} build
 
-wizard_examples_arm:
-  runs-on: ubuntu-latest
-  strategy:
-    fail-fast: false
-    matrix:
-      example:
-        - path: nxp/frdm-mcxn947-make-baremetal-builtin
-        - path: nxp/frdm-mcxn947-make-freertos-builtin
-        - path: nxp/rt1020-evk-make-baremetal-builtin
-        - path: nxp/rt1060-evk-make-baremetal-builtin
-        - path: nxp/rt1170-evk-make-baremetal-builtin
-        - path: stm32/nucleo-f429zi-make-baremetal-builtin
-        - path: stm32/nucleo-f429zi-make-freertos-builtin
-        - path: stm32/nucleo-f746zg-make-baremetal-builtin
-        - path: stm32/nucleo-f746zg-make-freertos-builtin
-        - path: stm32/nucleo-h563zi-make-baremetal-builtin
-        - path: stm32/nucleo-h563zi-make-freertos-builtin
-        - path: stm32/nucleo-h723zg-make-baremetal-builtin
-        - path: stm32/nucleo-h723zg-make-freertos-builtin
-        - path: stm32/nucleo-h743zi-make-baremetal-builtin
-        - path: stm32/nucleo-h743zi-make-freertos-builtin
-        - path: stm32/stm32h573i-dk-make-baremetal-builtin
-        - path: stm32/stm32h573i-dk-make-freertos-builtin
-        - path: ti/ek-tm4c1294xl-make-baremetal-builtin
-        - path: ti/ek-tm4c1294xl-make-freertos-builtin
-  name: ${{ matrix.example.path }}
-  env:
-    GO: 0
-  steps:
-    - uses: actions/checkout@v4
-      with: { fetch-depth: 2 }
-    - run: sudo apt -y update && sudo apt -y install gcc-arm-none-eabi
-    - run: make -C examples/${{ matrix.example.path }} build
+  wizard_examples_arm:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        example:
+          - path: nxp/frdm-mcxn947-make-baremetal-builtin
+          - path: nxp/frdm-mcxn947-make-freertos-builtin
+          - path: nxp/rt1020-evk-make-baremetal-builtin
+          - path: nxp/rt1060-evk-make-baremetal-builtin
+          - path: nxp/rt1170-evk-make-baremetal-builtin
+          - path: stm32/nucleo-f429zi-make-baremetal-builtin
+          - path: stm32/nucleo-f429zi-make-freertos-builtin
+          - path: stm32/nucleo-f746zg-make-baremetal-builtin
+          - path: stm32/nucleo-f746zg-make-freertos-builtin
+          - path: stm32/nucleo-h563zi-make-baremetal-builtin
+          - path: stm32/nucleo-h563zi-make-freertos-builtin
+          - path: stm32/nucleo-h723zg-make-baremetal-builtin
+          - path: stm32/nucleo-h723zg-make-freertos-builtin
+          - path: stm32/nucleo-h743zi-make-baremetal-builtin
+          - path: stm32/nucleo-h743zi-make-freertos-builtin
+          - path: stm32/stm32h573i-dk-make-baremetal-builtin
+          - path: stm32/stm32h573i-dk-make-freertos-builtin
+          - path: ti/ek-tm4c1294xl-make-baremetal-builtin
+          - path: ti/ek-tm4c1294xl-make-freertos-builtin
+    name: ${{ matrix.example.path }}
+    env:
+      GO: 0
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 2 }
+      - run: sudo apt -y update && sudo apt -y install gcc-arm-none-eabi
+      - run: make -C examples/${{ matrix.example.path }} build
 
 
-generic_examples:
+  generic_examples:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -402,7 +402,7 @@ generic_examples:
           - path: nxp/nxp-lpcxpresso54628-lwip-freertos
           - path: nxp/nxp-twrk65f180m-lwip-freertos
           - path: nxp/nxp-twrkv58f220m-lwip-freertos
-          - path: rp2040/pico-rmii
+          - path: pico-sdk/pico-rmii
           - path: stm32/nucleo-f429zi-make-baremetal-builtin-rndis
           - path: stm32/nucleo-f746zg-make-baremetal-builtin-rndis
           - path: stm32/nucleo-g031-make-baremetal-builtin
@@ -442,9 +442,10 @@ generic_examples:
           - path: nxp/rt1060-evk-make-freertos-builtin
           - path: nxp/rt1170-evk-make-freertos-builtin
           - path: renesas/ek-ra6m4-make-baremetal-builtin
-          - path: rp2040/pico-rndis-dashboard
-          - path: rp2040/pico-w
-          - path: rp2040/pico-w5500
+          - path: pico-sdk/pico-rndis-dashboard
+          - path: pico-sdk/pico-w
+          - path: pico-sdk/w5500-evb-pico-picosdk-baremetal-builtin
+          - path: pico-sdk/w5500-evb-pico2-picosdk-baremetal-builtin
           - path: stm32/nucleo-f746zg-make-freertos-tcp
           - path: stm32/nucleo-f746zg-make-baremetal-builtin-cmsis_driver
     name: ${{ matrix.example.path }} ${{ matrix.ssl }}
@@ -474,7 +475,7 @@ generic_examples:
       fail-fast: false
       matrix:
         example:
-          - path: rp2040/pico-rndis-device
+          - path: pico-sdk/pico-rndis-device
     name: ${{ matrix.example.path }}
     steps:
       - uses: actions/checkout@v4
@@ -511,7 +512,7 @@ generic_examples:
       - uses: actions/checkout@v4
         with: { fetch-depth: 2 }
       - run: sudo apt -y update && sudo apt -y install gcc-arm-none-eabi
-      - run: make -C examples/zephyr init
+      - run: make -C examples/zephyr init REPO=zephyrprojectrtos/ci:v.0.26.14 # "no space left on device" with newers
       - name: minify manifest
         uses: mikefarah/yq@master
         with:
@@ -655,5 +656,5 @@ generic_examples:
       with: { fetch-depth: 2 }
     - name: SDK
       run: sudo apt -y update && sudo apt -y install gcc-arm-none-eabi
-    - run:  make -C examples/rp2040/pico-w5500 test VCON_API_KEY=${{secrets.VCON_API_KEY}}
+    - run:  make -C examples/pico-sdk/w5500-evb-pico-picosdk-baremetal-builtin test VCON_API_KEY=${{secrets.VCON_API_KEY}}
 
