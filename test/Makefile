@@ -90,7 +90,7 @@ mip_test: mip_test.c mongoose.c mongoose.h packed_fs.c Makefile
 	$(CC) mip_test.c packed_fs.c $(CFLAGS) $(LDFLAGS) -o $@
 	ASAN_OPTIONS=$(ASAN_OPTIONS) $(RUN) ./$@
 
-mip_tap_test: mip_tap_test.c mongoose.c mongoose.h packed_fs.c Makefile
+mip_tap_test: mip_tap_test.c mongoose.c mongoose.h packed_fs.c Makefile tls_multirec/server
 	$(CC) mip_tap_test.c packed_fs.c $(CFLAGS) $(LDFLAGS) -o $@
 	ASAN_OPTIONS=$(ASAN_OPTIONS) $(RUN) ./$@
 
@@ -123,9 +123,15 @@ fuzz2: mongoose.c mongoose.h Makefile fuzz.c
 	$(CC) fuzz.c -DMAIN $(OPTS) $(WARN) $(ASAN) $(INCS) -o fuzzer
 	$(RUN) ./fuzzer $(FUZZDATA)
 
-test: Makefile mongoose.h $(SRCS)
+test: Makefile mongoose.h $(SRCS) tls_multirec/server
 	$(CC) $(SRCS) $(CFLAGS) $(LDFLAGS) -o unit_test
 	ASAN_OPTIONS=$(ASAN_OPTIONS) $(RUN) ./unit_test
+
+tls_multirec/server: FORCE
+	$(MAKE) -C tls_multirec CC=gcc
+
+FORCE:
+	true
 
 coverage: CFLAGS += -coverage
 coverage: test
@@ -158,11 +164,11 @@ s390: CC = $(DOCKER) mdashnet/s390 cc
 s390: RUN = $(DOCKER) mdashnet/s390
 s390: test
 
-arm: DEFS += -DMG_ENABLE_POSIX_FS=0 -DMG_ENABLE_TCPIP=1 -DMG_ENABLE_TCPIP_DRIVER_INIT=0 -DMG_ARCH=MG_ARCH_NEWLIB 
+arm: DEFS += -DMG_ENABLE_POSIX_FS=0 -DMG_ENABLE_TCPIP=1 -DMG_ENABLE_TCPIP_DRIVER_INIT=0 -DMG_ARCH=MG_ARCH_NEWLIB -DNO_SLEEP_ABORT
 arm: mongoose.h $(SRCS)
 	$(DOCKER) mdashnet/armgcc arm-none-eabi-gcc -mcpu=cortex-m3 -mthumb $(SRCS) $(OPTS) $(WARN) $(INCS) $(DEFS) $(TFLAGS) -o unit_test -nostartfiles --specs nosys.specs -e 0
 
-riscv: DEFS += -DMG_ENABLE_POSIX_FS=0 -DMG_ENABLE_TCPIP=1 -DMG_ENABLE_TCPIP_DRIVER_INIT=0 -DMG_ARCH=MG_ARCH_NEWLIB 
+riscv: DEFS += -DMG_ENABLE_POSIX_FS=0 -DMG_ENABLE_TCPIP=1 -DMG_ENABLE_TCPIP_DRIVER_INIT=0 -DMG_ARCH=MG_ARCH_NEWLIB -DNO_SLEEP_ABORT
 riscv: mongoose.h $(SRCS)
 	$(DOCKER) mdashnet/riscv riscv-none-elf-gcc -march=rv32imc -mabi=ilp32 $(SRCS) $(OPTS) $(WARN) $(INCS) $(DEFS) $(TFLAGS) -o unit_test
 
@@ -203,7 +209,7 @@ mongoose.c: Makefile $(wildcard ../src/*.c) $(wildcard ../src/drivers/*.c)
 	cd .. && (export LC_ALL=C ; cat src/license.h; echo; echo '#include "mongoose.h"' ; (for F in src/*.c src/drivers/*.c ; do echo; echo '#ifdef MG_ENABLE_LINES'; echo "#line 1 \"$$F\""; echo '#endif'; cat $$F | sed -e 's,#include ".*,,'; done))> $@
 
 mongoose.h: $(HDRS) Makefile
-	cd .. && (cat src/license.h; echo; echo '#ifndef MONGOOSE_H'; echo '#define MONGOOSE_H'; echo; cat src/version.h ; echo; echo '#ifdef __cplusplus'; echo 'extern "C" {'; echo '#endif'; cat src/arch.h src/arch_*.h src/net_ft.h src/net_lwip.h src/net_rl.h src/config.h src/str.h src/queue.h src/fmt.h src/printf.h src/log.h src/timer.h src/fs.h src/util.h src/url.h src/iobuf.h src/base64.h src/md5.h src/sha1.h src/sha256.h src/tls_x25519.h src/tls_aes128.h src/tls_uecc.h src/tls_chacha20.h src/event.h src/net.h src/http.h src/ssi.h src/tls.h src/tls_mbed.h src/tls_openssl.h src/ws.h src/sntp.h src/mqtt.h src/dns.h src/json.h src/rpc.h src/ota.h src/flash.h src/net_builtin.h src/profile.h src/drivers/*.h | sed -e '/keep/! s,#include ".*,,' -e 's,^#pragma once,,'; echo; echo '#ifdef __cplusplus'; echo '}'; echo '#endif'; echo '#endif  // MONGOOSE_H')> $@
+	cd .. && (cat src/license.h; echo; echo '#ifndef MONGOOSE_H'; echo '#define MONGOOSE_H'; echo; cat src/version.h ; echo; echo '#ifdef __cplusplus'; echo 'extern "C" {'; echo '#endif'; cat src/arch.h src/arch_*.h src/net_ft.h src/net_lwip.h src/net_rl.h src/config.h src/str.h src/queue.h src/fmt.h src/printf.h src/log.h src/timer.h src/fs.h src/util.h src/url.h src/iobuf.h src/base64.h src/md5.h src/sha1.h src/sha256.h src/tls_x25519.h src/tls_aes128.h src/tls_uecc.h src/tls_chacha20.h src/tls_rsa.h src/event.h src/net.h src/http.h src/ssi.h src/tls.h src/tls_mbed.h src/tls_openssl.h src/ws.h src/sntp.h src/mqtt.h src/dns.h src/json.h src/rpc.h src/ota.h src/flash.h src/net_builtin.h src/profile.h src/drivers/*.h | sed -e '/keep/! s,#include ".*,,' -e 's,^#pragma once,,'; echo; echo '#ifdef __cplusplus'; echo '}'; echo '#endif'; echo '#endif  // MONGOOSE_H')> $@
 
 
 clean: clean_examples clean_refprojs clean_tutorials clean_examples_embedded

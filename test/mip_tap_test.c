@@ -3,8 +3,7 @@
 
 #define MIPTAPTEST_USING_DHCP 1
 
-#define FETCH_BUF_SIZE (8 * 1024)
-
+#define FETCH_BUF_SIZE (16 * 1024)
 
 #include <sys/socket.h>
 #ifndef __OpenBSD__
@@ -21,10 +20,9 @@
 
 #include "driver_mock.c"
 
-
-#define MQTT_URL "mqtt://broker.hivemq.com:1883"    // MQTT broker URL
+#define MQTT_URL "mqtt://broker.hivemq.com:1883"  // MQTT broker URL
 #if MG_TLS == MG_TLS_BUILTIN
-#define MQTTS_URL "mqtts://mongoose.ws:8883"     // HiveMQ does not do TLS1.3
+#define MQTTS_URL "mqtts://mongoose.ws:8883"  // HiveMQ does not do TLS1.3
 #define MQTTS_CA mg_str(s_ca_cert)
 static const char *s_ca_cert =
     "-----BEGIN CERTIFICATE-----\n"
@@ -59,16 +57,17 @@ static const char *s_ca_cert =
     "emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=\n"
     "-----END CERTIFICATE-----\n";
 #elif MG_TLS
-#define MQTTS_URL "mqtts://broker.hivemq.com:8883"    // MQTT broker URL
+#define MQTTS_URL "mqtts://broker.hivemq.com:8883"  // MQTT broker URL
 #define MQTTS_CA mg_unpacked("/data/ca.pem")
 #endif
 
+static char *host_ip;
 
 static int s_num_tests = 0;
 
-#define ABORT()                                                 \
-      usleep(500000);  /* 500 ms, GH print reason */            \
-      abort();
+#define ABORT()                                 \
+  usleep(500000); /* 500 ms, GH print reason */ \
+  abort();
 
 #define ASSERT(expr)                                            \
   do {                                                          \
@@ -78,6 +77,21 @@ static int s_num_tests = 0;
       ABORT();                                                  \
     }                                                           \
   } while (0)
+
+static struct mg_http_message gethm(const char *buf) {
+  struct mg_http_message hm;
+  memset(&hm, 0, sizeof(hm));
+  mg_http_parse(buf, strlen(buf), &hm);
+  return hm;
+}
+
+static int cmpbody(const char *buf, const char *str) {
+  struct mg_str s = mg_str(str);
+  struct mg_http_message hm = gethm(buf);
+  size_t len = strlen(buf);
+  if (hm.body.len > len) hm.body.len = len - (size_t) (hm.body.buf - buf);
+  return mg_strcmp(hm.body, s);
+}
 
 // MIP TUNTAP driver
 static size_t tap_rx(void *buf, size_t len, struct mg_tcpip_if *ifp) {
@@ -100,14 +114,14 @@ static bool tap_up(struct mg_tcpip_if *ifp) {
   return ifp->driver_data ? true : false;
 }
 
-
 static void eh1(struct mg_connection *c, int ev, void *ev_data) {
   struct mg_tls_opts *topts = (struct mg_tls_opts *) c->fn_data;
   if (ev == MG_EV_ACCEPT && topts != NULL) mg_tls_init(c, topts);
   if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-    MG_DEBUG(("[%.*s %.*s] message len %d", (int) hm->method.len, hm->method.buf,
-             (int) hm->uri.len, hm->uri.buf, (int) hm->message.len));
+    MG_DEBUG(("[%.*s %.*s] message len %d", (int) hm->method.len,
+              hm->method.buf, (int) hm->uri.len, hm->uri.buf,
+              (int) hm->message.len));
     if (mg_match(hm->uri, mg_str("/foo/*"), NULL)) {
       mg_http_reply(c, 200, "", "uri: %.*s", hm->uri.len - 5, hm->uri.buf + 5);
     } else if (mg_match(hm->uri, mg_str("/ws"), NULL)) {
@@ -144,15 +158,22 @@ static void fcb(struct mg_connection *c, int ev, void *ev_data) {
       memset(&opts, 0, sizeof(opts));  // read CA from packed_fs
       opts.name = mg_url_host(fd->url);
       opts.ca = mg_unpacked("/data/ca.pem");
+      if (host_ip != NULL && strstr(fd->url, host_ip) != NULL) {
+        MG_DEBUG(("Local connection, using self-signed certificates"));
+        opts.name = mg_str_s("localhost");
+        opts.ca = mg_unpacked("/certs/ca.crt");
+      }
       mg_tls_init(c, &opts);
     }
   } else if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
-    snprintf(fd->buf, FETCH_BUF_SIZE, "%.*s", (int) hm->message.len, hm->message.buf);
+    snprintf(fd->buf, FETCH_BUF_SIZE, "%.*s", (int) hm->message.len,
+             hm->message.buf);
     fd->code = atoi(hm->uri.buf);
     fd->closed = 1;
     c->is_closing = 1;
-    MG_DEBUG(("CODE: %d, MSG: %.*s", fd->code, (int) hm->message.len, hm->message.buf));
+    MG_DEBUG(("CODE: %d, MSG: %.*s", fd->code, (int) hm->message.len,
+              hm->message.buf));
     (void) c;
   } else if (ev == MG_EV_CLOSE) {
     MG_DEBUG(("CLOSE"));
@@ -169,15 +190,22 @@ static int fetch(struct mg_mgr *mgr, char *buf, const char *url,
   int i;
   struct mg_connection *c = NULL;
   va_list ap;
+  mg_mgr_poll(mgr, 0);  // update ifp->now to avoid ARP lookup using an old
+                        // timestamp (from an ancient call in other test)
   c = mg_http_connect(mgr, url, fcb, &fd);
   ASSERT(c != NULL);
   va_start(ap, fmt);
   mg_vprintf(c, fmt, &ap);
   va_end(ap);
   buf[0] = '\0';
+  // - TLS: multiple (small) records: allow enough loops so mg_mgr_poll can
+  // process buffered records when no more frames are coming in
   for (i = 0; i < 500 && buf[0] == '\0' && !fd.closed; i++) {
     mg_mgr_poll(mgr, 0);
-    usleep(10000);  // 10 ms. Slow down poll loop to ensure packet transit
+    usleep(5000);  // 5 ms. Slow down poll loop to ensure packet transit, but
+                   // allow enough loops to get the ARP response, otherwise,
+                   // given enough traffic, the timer expires before we get a
+                   // chance to see the response
   }
   if (!fd.closed) c->is_closing = 1;
   mg_mgr_poll(mgr, 0);
@@ -190,16 +218,20 @@ static void test_http_client(struct mg_mgr *mgr) {
   const bool ipv6 = 0;
 #if MG_TLS
   if (ipv6) {
-    rc = fetch(mgr, buf, "https://ipv6.google.com", "GET / HTTP/1.0\r\nHost: ipv6.google.com\r\n\r\n");
+    rc = fetch(mgr, buf, "https://ipv6.google.com",
+               "GET / HTTP/1.0\r\nHost: ipv6.google.com\r\n\r\n");
   } else {
-    rc = fetch(mgr, buf, "https://cesanta.com", "GET /robots.txt HTTP/1.0\r\nHost: cesanta.com\r\n\r\n");
+    rc = fetch(mgr, buf, "https://cesanta.com",
+               "GET /robots.txt HTTP/1.0\r\nHost: cesanta.com\r\n\r\n");
   }
   ASSERT(rc == 200);  // OK
 #else
   if (ipv6) {
-    rc = fetch(mgr, buf, "http://ipv6.google.com", "GET / HTTP/1.0\r\nHost: ipv6.google.com\r\n\r\n");
+    rc = fetch(mgr, buf, "http://ipv6.google.com",
+               "GET / HTTP/1.0\r\nHost: ipv6.google.com\r\n\r\n");
   } else {
-    rc = fetch(mgr, buf, "http://cesanta.com", "GET /robots.txt HTTP/1.0\r\nHost: cesanta.com\r\n\r\n");
+    rc = fetch(mgr, buf, "http://cesanta.com",
+               "GET /robots.txt HTTP/1.0\r\nHost: cesanta.com\r\n\r\n");
   }
   ASSERT(rc == 301);  // OK: Permanently moved (HTTP->HTTPS redirect)
 
@@ -234,8 +266,10 @@ static void mqtt_fn(struct mg_connection *c, int ev, void *ev_data) {
     mg_mqtt_pub(c, &pub_opts);
   } else if (ev == MG_EV_MQTT_MSG) {
     struct mg_mqtt_message *mm = (struct mg_mqtt_message *) ev_data;
-    MG_DEBUG(("TOPIC: %.*s, MSG: %.*s", (int) mm->topic.len, mm->topic.buf, (int) mm->data.len, mm->data.buf));
-    ASSERT(mm->topic.len == strlen(s_topic) && strcmp(mm->topic.buf, s_topic) == 0);
+    MG_DEBUG(("TOPIC: %.*s, MSG: %.*s", (int) mm->topic.len, mm->topic.buf,
+              (int) mm->data.len, mm->data.buf));
+    ASSERT(mm->topic.len == strlen(s_topic) &&
+           strcmp(mm->topic.buf, s_topic) == 0);
     ASSERT(mm->data.len == 2 && strcmp(mm->data.buf, "hi") == 0);
     mg_mqtt_disconnect(c, NULL);
     *(bool *) c->fn_data = true;
@@ -277,7 +311,7 @@ static void *poll_thread(void *p) {
   return NULL;
 }
 
-static void test_http_server(struct mg_mgr *mgr, uint32_t ip) {
+static void test_http_server(struct mg_mgr *mgr) {
   struct mg_connection *c;
   char *cmd;
   pthread_t thread_id = (pthread_t) 0;
@@ -288,25 +322,55 @@ static void test_http_server(struct mg_mgr *mgr, uint32_t ip) {
   opts.cert = mg_unpacked("/certs/server.crt");
   opts.key = mg_unpacked("/certs/server.key");
   c = mg_http_listen(mgr, "https://0.0.0.0:12347", eh1, &opts);
-  cmd = mg_mprintf("./mip_curl.sh --insecure https://%M:12347", mg_print_ip4, &ip);
+  cmd = mg_mprintf("./mip_curl.sh --insecure https://%M:12347", mg_print_ip4,
+                   &mgr->ifp->ip);
 #else
   c = mg_http_listen(mgr, "http://0.0.0.0:12347", eh1, NULL);
-  cmd = mg_mprintf("./mip_curl.sh http://%M:12347", mg_print_ip4, &ip);
+  cmd =
+      mg_mprintf("./mip_curl.sh http://%M:12347", mg_print_ip4, &mgr->ifp->ip);
 #endif
   ASSERT(c != NULL);
-  pthread_create(&thread_id, NULL, poll_thread, mgr); // simpler this way, no concurrency anyway
+  pthread_create(&thread_id, NULL, poll_thread,
+                 mgr);  // simpler this way, no concurrency anyway
   MG_DEBUG(("CURL"));
-  ASSERT(system(cmd) == 0);       // wait for curl
+  ASSERT(system(cmd) == 0);  // wait for curl
   MG_DEBUG(("MONGOOSE"));
   pthread_join(thread_id, NULL);  // wait for Mongoose
   MG_DEBUG(("DONE"));
   free(cmd);
 }
 
+static void test_tls(struct mg_mgr *mgr) {
+#if MG_TLS
+  char *url;
+  char buf[FETCH_BUF_SIZE];  // make sure it can hold Makefile
+  struct mg_str data = mg_unpacked("/Makefile");
+  if (host_ip == NULL) {
+    printf("\nNo HOST_IP provided, skipping TLS tests\n");
+    return;
+  }
+  printf("HOST_IP: %s\n", host_ip);
+  // - POST a large file, make sure we drain TLS buffers and read all: done at
+  // server test, using curl as POSTing client
+  // - Fire patched server, test multiple TLS records per TCP segment handling
+  url = mg_mprintf("https://%s:8443", host_ip);  // for historic reasons
+  ASSERT(system("tls_multirec/server -d tls_multirec &") == 0);
+  sleep(1);
+  ASSERT(fetch(mgr, buf, url, "GET /thefile HTTP/1.0\n\n") == 200);
+  ASSERT(cmpbody(buf, data.buf) == 0);  // "thefile" links to Makefile
+  ASSERT(system("killall tls_multirec/server") == 0);
+  free(url);
+#else
+  (void) cmpbody("", "");
+  (void) mgr;
+#endif
+}
+
 int main(void) {
+  const char *debug_level = getenv("V");
   // Setup interface
   const char *iface = "tap0";             // Network iface
-  const char *mac = "00:00:01:02:03:78";  // MAC address
+  const char *mac = "02:00:01:02:03:78";  // MAC address
 #ifndef __OpenBSD__
   const char *tuntap_device = "/dev/net/tun";
 #else
@@ -334,9 +398,13 @@ int main(void) {
   MG_INFO(("Opened TAP interface: %s", iface));
   usleep(200000);  // 200 ms
 
+  if (debug_level == NULL) debug_level = "3";
+  mg_log_set(atoi(debug_level));
+
+  host_ip = getenv("HOST_IP");
+
   // Events
   struct mg_mgr mgr;  // Event manager
-  mg_log_set(MG_LL_DEBUG);
   mg_mgr_init(&mgr);  // Initialise event manager
 
   // MIP driver
@@ -383,12 +451,18 @@ int main(void) {
   if (!mif.ip) MG_ERROR(("No ip assigned (DHCP lease may have failed).\n"));
   ASSERT(mif.ip);  // We have an IP (lease or static)
 #endif
+  while (mif.state != MG_TCPIP_STATE_READY) {
+    mg_mgr_poll(&mgr, 100);
+    usleep(10000);  // 10 ms
+  }
 
   // RUN TESTS
   usleep(500000);  // 500 ms
   test_http_client(&mgr);
   usleep(500000);  // 500 ms
-  test_http_server(&mgr, mif.ip);
+  test_http_server(&mgr);
+  usleep(500000);  // 500 ms
+  test_tls(&mgr);
   usleep(500000);  // 500 ms
   test_mqtt_connsubpub(&mgr);
   usleep(500000);  // 500 ms

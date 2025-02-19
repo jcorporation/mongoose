@@ -33,7 +33,7 @@ jobs:
       with: { fetch-depth: 2 }
     - run: if ./test/match_changed_files.sh '^test|^src/.*.[ch]' ; then echo GO=1 >> $GITHUB_ENV ; fi
     - if: ${{ env.GO == 1 }}
-      run: sudo apt -y update ; sudo apt -y install qemu binfmt-support qemu-user-static && docker run --rm --privileged multiarch/qemu-user-static --reset -p yes && make -C test s390
+      run: sudo apt -y update ; sudo apt -y install binfmt-support qemu-user-static && docker run --rm --privileged multiarch/qemu-user-static --reset -p yes && make -C test s390
   armhf:
     runs-on: ubuntu-latest
     steps:
@@ -41,7 +41,7 @@ jobs:
       with: { fetch-depth: 2 }
     - run: if ./test/match_changed_files.sh '^test|^src/.*.[ch]' ; then echo GO=1 >> $GITHUB_ENV ; fi
     - if: ${{ env.GO == 1 }}
-      run: sudo apt -y update ; sudo apt -y install qemu binfmt-support qemu-user-static && docker run --rm --privileged multiarch/qemu-user-static --reset -p yes && make -C test armhf
+      run: sudo apt -y update ; sudo apt -y install binfmt-support qemu-user-static && docker run --rm --privileged multiarch/qemu-user-static --reset -p yes && make -C test armhf
   unamalgamated-mg_prefix:
     runs-on: ubuntu-latest
     steps:
@@ -59,7 +59,7 @@ jobs:
     name: macos SSL=${{ matrix.ssl }}
     env:
       SSL: ${{ matrix.ssl }}
-      TFLAGS: -DNO_SNTP_CHECK
+      #TFLAGS: -DNO_SNTP_CHECK
       HOMEBREW_NO_AUTO_UPDATE: 1
     steps:
     - uses: actions/checkout@v4
@@ -206,6 +206,10 @@ jobs:
           - path: nxp/rt1020-evk-make-baremetal-builtin
           - path: nxp/rt1060-evk-make-baremetal-builtin
           - path: nxp/rt1170-evk-make-baremetal-builtin
+          - path: pico-sdk/pico-w-picosdk-baremetal-builtin
+          - path: pico-sdk/pico-2-w-picosdk-baremetal-builtin
+          - path: pico-sdk/w5500-evb-pico-picosdk-baremetal-builtin
+          - path: pico-sdk/w5500-evb-pico2-picosdk-baremetal-builtin
           - path: stm32/nucleo-f429zi-make-baremetal-builtin
           - path: stm32/nucleo-f429zi-make-freertos-builtin
           - path: stm32/nucleo-f746zg-make-baremetal-builtin
@@ -309,9 +313,8 @@ jobs:
           - path: nxp/rt1170-evk-make-freertos-builtin
           - path: renesas/ek-ra6m4-make-baremetal-builtin
           - path: pico-sdk/pico-rndis-dashboard
-          - path: pico-sdk/pico-w
-          - path: pico-sdk/w5500-evb-pico-picosdk-baremetal-builtin
-          - path: pico-sdk/w5500-evb-pico2-picosdk-baremetal-builtin
+          - path: pico-sdk/pico-w-picosdk-freertos-lwip
+          - path: pico-sdk/pico-2-w-picosdk-freertos-lwip
           - path: stm32/nucleo-f746zg-make-freertos-tcp
           - path: stm32/nucleo-f746zg-make-baremetal-builtin-cmsis_driver
     name: ${{ matrix.example.path }}
@@ -735,7 +738,7 @@ jobs:
       with: { fetch-depth: 2 }
     - name: SDK
       run: |
-        if ./test/match_changed_files.sh "^src|examples/device-dashboard|examples/pico-sdk/w5500-evb-pico-picosdk-baremetal-builtin" ; then
+        if ./test/match_changed_files.sh "^src" ; then
           echo GO=1 >> $GITHUB_ENV
           sudo apt -y update && sudo apt -y install gcc-arm-none-eabi
         fi
