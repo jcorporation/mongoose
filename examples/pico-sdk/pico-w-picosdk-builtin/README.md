@@ -1,4 +1,0 @@
-
-# Mongoose on PICO W
-
-
