@@ -424,7 +424,7 @@ static void mg_tls_encrypt(struct mg_connection *c, const uint8_t *msg,
   nonce[8] ^= (uint8_t) ((seq >> 24) & 255U);
   nonce[9] ^= (uint8_t) ((seq >> 16) & 255U);
   nonce[10] ^= (uint8_t) ((seq >> 8) & 255U);
-  nonce[11] ^= (uint8_t) ((seq) & 255U);
+  nonce[11] ^= (uint8_t) ((seq) &255U);
 
   mg_iobuf_add(wio, wio->len, hdr, sizeof(hdr));
   mg_iobuf_resize(wio, wio->len + encsz);
@@ -503,7 +503,7 @@ static int mg_tls_recv_record(struct mg_connection *c) {
   nonce[8] ^= (uint8_t) ((seq >> 24) & 255U);
   nonce[9] ^= (uint8_t) ((seq >> 16) & 255U);
   nonce[10] ^= (uint8_t) ((seq >> 8) & 255U);
-  nonce[11] ^= (uint8_t) ((seq) & 255U);
+  nonce[11] ^= (uint8_t) ((seq) &255U);
 #if CHACHA20
   {
     uint8_t *dec = (uint8_t *) calloc(1, msgsz);
@@ -570,7 +570,9 @@ static int mg_tls_server_recv_hello(struct mg_connection *c) {
     mg_error(c, "not a client hello packet");
     return -1;
   }
+  if (rio->len < 50) goto fail;
   msgsz = MG_LOAD_BE16(rio->buf + 3);
+  if (((uint32_t) msgsz + 4) > rio->len) goto fail;
   mg_sha256_update(&tls->sha256, rio->buf + 5, msgsz);
   // store client random
   memmove(tls->random, rio->buf + 11, sizeof(tls->random));
@@ -582,10 +584,11 @@ static int mg_tls_server_recv_hello(struct mg_connection *c) {
     MG_INFO(("bad session id len"));
   }
   cipher_suites_len = MG_LOAD_BE16(rio->buf + 44 + session_id_len);
-  if (cipher_suites_len > (rio->len - 46 - session_id_len)) goto fail;
+  if (((uint32_t) cipher_suites_len + 46 + session_id_len) > rio->len)
+    goto fail;
   ext_len = MG_LOAD_BE16(rio->buf + 48 + session_id_len + cipher_suites_len);
   ext = rio->buf + 50 + session_id_len + cipher_suites_len;
-  if (ext_len > (rio->len - 50 - session_id_len - cipher_suites_len)) goto fail;
+  if (((unsigned char *) ext + ext_len) > (rio->buf + rio->len)) goto fail;
   for (j = 0; j < ext_len;) {
     uint16_t k;
     uint16_t key_exchange_len;
@@ -597,12 +600,12 @@ static int mg_tls_server_recv_hello(struct mg_connection *c) {
     }
     key_exchange_len = MG_LOAD_BE16(ext + j + 4);
     key_exchange = ext + j + 6;
-    if (key_exchange_len >
-        rio->len - (uint16_t) ((size_t) key_exchange - (size_t) rio->buf))
+    if (((size_t) key_exchange_len +
+         ((size_t) key_exchange - (size_t) rio->buf)) > rio->len)
       goto fail;
     for (k = 0; k < key_exchange_len;) {
       uint16_t m = MG_LOAD_BE16(key_exchange + k + 2);
-      if (m > (key_exchange_len - k - 4)) goto fail;
+      if (((uint32_t) m + k + 4) > key_exchange_len) goto fail;
       if (m == 32 && key_exchange[k] == 0x00 && key_exchange[k + 1] == 0x1d) {
         memmove(tls->x25519_cli, key_exchange + k + 4, m);
         mg_tls_drop_record(c);
@@ -1261,7 +1264,7 @@ static int mg_tls_client_recv_cert(struct mg_connection *c) {
   struct mg_tls_cert certs[8];
   int certnum = 0;
   uint8_t *p = recv_buf + 8;
-  //uint8_t *endp = recv_buf + tls->recv_len;
+  // uint8_t *endp = recv_buf + tls->recv_len;
   uint8_t *endp = recv_buf + cert_chain_len;
 
   int found_ca = 0;
@@ -1370,7 +1373,8 @@ static int mg_tls_client_recv_cert_verify(struct mg_connection *c) {
              tls->recv_len - 8);
     return -1;
   }
-  MG_VERBOSE(("certificate verification, algo=%04x, siglen=%d", sigalg, siglen));
+  MG_VERBOSE(
+      ("certificate verification, algo=%04x, siglen=%d", sigalg, siglen));
 
   if (sigalg == 0x0804) {  // rsa_pss_rsae_sha256
     uint8_t sig2[512];     // 2048 or 4096 bits
@@ -1523,7 +1527,9 @@ static void mg_tls_client_handshake(struct mg_connection *c) {
       c->is_tls_hs = 0;
       mg_call(c, MG_EV_TLS_HS, NULL);
       break;
-    default: mg_error(c, "unexpected client state: %d", tls->state); break;
+    default:
+      mg_error(c, "unexpected client state: %d", tls->state);
+      break;
   }
 }
 
@@ -1550,7 +1556,9 @@ static void mg_tls_server_handshake(struct mg_connection *c) {
       tls->state = MG_TLS_STATE_SERVER_CONNECTED;
       c->is_tls_hs = 0;
       return;
-    default: mg_error(c, "unexpected server state: %d", tls->state); break;
+    default:
+      mg_error(c, "unexpected server state: %d", tls->state);
+      break;
   }
 }
 
@@ -1684,15 +1692,22 @@ void mg_tls_free(struct mg_connection *c) {
 long mg_tls_send(struct mg_connection *c, const void *buf, size_t len) {
   struct tls_data *tls = (struct tls_data *) c->tls;
   long n = MG_IO_WAIT;
-  if (len > MG_IO_SIZE) len = MG_IO_SIZE;
-  if (len > 16384) len = 16384;
-  mg_tls_encrypt(c, (const uint8_t *) buf, len, MG_TLS_APP_DATA);
+  bool was_throttled = c->is_tls_throttled;  // see #3074
+  if (!was_throttled) {                      // encrypt new data
+    if (len > MG_IO_SIZE) len = MG_IO_SIZE;
+    if (len > 16384) len = 16384;
+    mg_tls_encrypt(c, (const uint8_t *) buf, len, MG_TLS_APP_DATA);
+  }  // else, resend outstanding encrypted data in tls->send
   while (tls->send.len > 0 &&
          (n = mg_io_send(c, tls->send.buf, tls->send.len)) > 0) {
     mg_iobuf_del(&tls->send, 0, (size_t) n);
   }
-  if (n == MG_IO_ERR || n == MG_IO_WAIT) return n;
-  return (long) len;
+  c->is_tls_throttled = (tls->send.len > 0 && n == MG_IO_WAIT);
+  MG_VERBOSE(("%lu %ld %ld %ld %c %c", c->id, (long) len, (long) tls->send.len,
+              n, was_throttled ? 'T' : 't', c->is_tls_throttled ? 'T' : 't'));
+  if (n == MG_IO_ERR) return MG_IO_ERR;
+  if (was_throttled) return MG_IO_WAIT;  // sent throttled data instead
+  return (long) len;  // return len even when throttled, already encripted that
 }
 
 long mg_tls_recv(struct mg_connection *c, void *buf, size_t len) {
@@ -1712,6 +1727,7 @@ long mg_tls_recv(struct mg_connection *c, void *buf, size_t len) {
     mg_tls_drop_record(c);
     return MG_IO_WAIT;
   }
+  if (buf == NULL || len == 0) return 0L;
   minlen = len < tls->recv_len ? len : tls->recv_len;
   memmove(buf, recv_buf, minlen);
   tls->recv_offset += minlen;

@@ -1,6 +1,6 @@
 #include "net_builtin.h"
 
-#if defined(MG_ENABLE_TCPIP) && MG_ENABLE_TCPIP
+#if MG_ENABLE_TCPIP
 #define MG_EPHEMERAL_PORT_BASE 32768
 #define PDIFF(a, b) ((size_t) (((char *) (b)) - ((char *) (a))))
 
@@ -16,11 +16,12 @@
 
 struct connstate {
   uint32_t seq, ack;           // TCP seq/ack counters
-  uint64_t timer;              // TCP keep-alive / ACK timer
+  uint64_t timer;              // TCP timer (see 'ttype' below)
   uint32_t acked;              // Last ACK-ed number
   size_t unacked;              // Not acked bytes
+  uint16_t dmss;               // destination MSS (from TCP opts)
   uint8_t mac[6];              // Peer MAC address
-  uint8_t ttype;               // Timer type. 0: ack, 1: keep-alive
+  uint8_t ttype;               // Timer type:
 #define MIP_TTYPE_KEEPALIVE 0  // Connection is idle for long, send keepalive
 #define MIP_TTYPE_ACK 1        // Peer sent us data, we have to ack it soon
 #define MIP_TTYPE_ARP 2        // ARP resolve sent, waiting for response
@@ -121,7 +122,7 @@ struct dhcp {
   uint32_t ciaddr, yiaddr, siaddr, giaddr;
   uint8_t hwaddr[208];
   uint32_t magic;
-  uint8_t options[32];
+  uint8_t options[30 + sizeof(((struct mg_tcpip_if *) 0)->dhcp_name)];
 };
 
 #pragma pack(pop)
@@ -176,6 +177,7 @@ static void settmout(struct mg_connection *c, uint8_t type) {
                : type == MIP_TTYPE_SYN ? MIP_TCP_SYN_MS
                : type == MIP_TTYPE_FIN ? MIP_TCP_FIN_MS
                                        : MIP_TCP_KEEPALIVE_MS;
+  if (s->ttype == MIP_TTYPE_FIN) return; // skip if 3-way closing
   s->timer = ifp->now + n;
   s->ttype = type;
   MG_VERBOSE(("%lu %d -> %llx", c->id, type, s->timer));
@@ -280,22 +282,26 @@ static const uint8_t broadcast[] = {255, 255, 255, 255, 255, 255};
 // RFC-2131 #4.3.6, #4.4.1; RFC-2132 #9.8
 static void tx_dhcp_request_sel(struct mg_tcpip_if *ifp, uint32_t ip_req,
                                 uint32_t ip_srv) {
-  uint8_t opts[] = {
-      53, 1, 3,                   // Type: DHCP request
-      12, 3, 'm', 'i', 'p',       // Host name: "mip"
-      54, 4, 0,   0,   0,   0,    // DHCP server ID
-      50, 4, 0,   0,   0,   0,    // Requested IP
-      55, 2, 1,   3,   255, 255,  // GW, mask [DNS] [SNTP]
-      255                         // End of options
-  };
-  uint8_t addopts = 0;
-  memcpy(opts + 10, &ip_srv, sizeof(ip_srv));
-  memcpy(opts + 16, &ip_req, sizeof(ip_req));
-  if (ifp->enable_req_dns) opts[24 + addopts++] = 6;    // DNS
-  if (ifp->enable_req_sntp) opts[24 + addopts++] = 42;  // SNTP
-  opts[21] += addopts;
-  tx_dhcp(ifp, (uint8_t *) broadcast, 0, 0xffffffff, opts,
-          sizeof(opts) + addopts - 2, false);
+  uint8_t extra = (uint8_t) ((ifp->enable_req_dns ? 1 : 0) +
+                             (ifp->enable_req_sntp ? 1 : 0));
+  size_t len = strlen(ifp->dhcp_name);
+  size_t olen = 21 + len + extra + 2 + 1;  // Total length of options
+#define OPTS_MAXLEN (21 + sizeof(ifp->dhcp_name) + 2 + 2 + 1)
+  uint8_t opts[OPTS_MAXLEN];  // Allocate options (max size possible)
+  uint8_t *p = opts;
+  assert(olen <= sizeof(opts));
+  memset(opts, 0, sizeof(opts));
+  *p++ = 53, *p++ = 1, *p++ = 3;                       // Type: DHCP request
+  *p++ = 54, *p++ = 4, memcpy(p, &ip_srv, 4), p += 4;  // DHCP server ID
+  *p++ = 50, *p++ = 4, memcpy(p, &ip_req, 4), p += 4;  // Requested IP
+  *p++ = 12, *p++ = (uint8_t) (len & 255);             // DHCP host
+  memcpy(p, ifp->dhcp_name, len), p += len;            // name
+  *p++ = 55, *p++ = 2 + extra, *p++ = 1, *p++ = 3;     // GW, MASK
+  if (ifp->enable_req_dns) *p++ = 6;                   // DNS
+  if (ifp->enable_req_sntp) *p++ = 42;                 // SNTP
+  *p++ = 255;                                          // End of options
+  // assert((size_t) (p - opts) < olen);
+  tx_dhcp(ifp, (uint8_t *) broadcast, 0, 0xffffffff, opts, olen, 0);
   MG_DEBUG(("DHCP req sent"));
 }
 
@@ -520,17 +526,17 @@ static void rx_udp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
 static size_t tx_tcp(struct mg_tcpip_if *ifp, uint8_t *dst_mac, uint32_t dst_ip,
                      uint8_t flags, uint16_t sport, uint16_t dport,
                      uint32_t seq, uint32_t ack, const void *buf, size_t len) {
-#if 0
-  uint8_t opts[] = {2, 4, 5, 0xb4, 4, 2, 0, 0};  // MSS = 1460, SACK permitted
-  if (flags & TH_SYN) {
-    // Handshake? Set MSS
+  struct ip *ip;
+  struct tcp *tcp;
+  uint16_t opts[4 / 2];
+  if (flags & TH_SYN) {                 // Send MSS, RFC-9293 3.7.1
+    opts[0] = mg_htons(0x0204);         // RFC-9293 3.2
+    opts[1] = mg_htons(ifp->mtu - 40);  // RFC-6691
     buf = opts;
     len = sizeof(opts);
   }
-#endif
-  struct ip *ip =
-      tx_ip(ifp, dst_mac, 6, ifp->ip, dst_ip, sizeof(struct tcp) + len);
-  struct tcp *tcp = (struct tcp *) (ip + 1);
+  ip = tx_ip(ifp, dst_mac, 6, ifp->ip, dst_ip, sizeof(struct tcp) + len);
+  tcp = (struct tcp *) (ip + 1);
   memset(tcp, 0, sizeof(*tcp));
   if (buf != NULL && len) memmove(tcp + 1, buf, len);
   tcp->sport = sport;
@@ -540,7 +546,7 @@ static size_t tx_tcp(struct mg_tcpip_if *ifp, uint8_t *dst_mac, uint32_t dst_ip,
   tcp->flags = flags;
   tcp->win = mg_htons(MIP_TCP_WIN);
   tcp->off = (uint8_t) (sizeof(*tcp) / 4 << 4);
-  // if (flags & TH_SYN) tcp->off = 0x70;  // Handshake? header size 28 bytes
+  if (flags & TH_SYN) tcp->off += (uint8_t) (sizeof(opts) / 4 << 4);
 
   uint32_t cs = 0;
   uint16_t n = (uint16_t) (sizeof(*tcp) + len);
@@ -574,6 +580,7 @@ static struct mg_connection *accept_conn(struct mg_connection *lsn,
     return NULL;
   }
   struct connstate *s = (struct connstate *) (c + 1);
+  s->dmss = 1460; // TODO(scaprile): 536;     // assume default, RFC-9293 3.7.1
   s->seq = mg_ntohl(pkt->tcp->ack), s->ack = mg_ntohl(pkt->tcp->seq);
   memcpy(s->mac, pkt->eth->src, sizeof(s->mac));
   settmout(c, MIP_TTYPE_KEEPALIVE);
@@ -627,10 +634,11 @@ long mg_io_send(struct mg_connection *c, const void *buf, size_t len) {
   len = trim_len(c, len);
   if (c->is_udp) {
     tx_udp(ifp, s->mac, ifp->ip, c->loc.port, dst_ip, c->rem.port, buf, len);
-  } else {
-    size_t sent =
-        tx_tcp(ifp, s->mac, dst_ip, TH_PUSH | TH_ACK, c->loc.port, c->rem.port,
-               mg_htonl(s->seq), mg_htonl(s->ack), buf, len);
+  } else {  // TCP, cap to peer's MSS
+    size_t sent;
+    if (len > s->dmss) len = s->dmss;  // RFC-6691: reduce if sending opts
+    sent = tx_tcp(ifp, s->mac, dst_ip, TH_PUSH | TH_ACK, c->loc.port,
+                  c->rem.port, mg_htonl(s->seq), mg_htonl(s->ack), buf, len);
     if (sent == 0) {
       return MG_IO_WAIT;
     } else if (sent == (size_t) -1) {
@@ -651,7 +659,8 @@ static void handle_tls_recv(struct mg_connection *c) {
     mg_error(c, "oom");
   } else {
     // Decrypt data directly into c->recv
-    long n = mg_tls_recv(c, &io->buf[io->len], io->size - io->len);
+    long n = mg_tls_recv(c, io->buf != NULL ? &io->buf[io->len] : io->buf,
+                         io->size - io->len);
     if (n == MG_IO_ERR) {
       mg_error(c, "TLS recv error");
     } else if (n > 0) {
@@ -689,8 +698,10 @@ static void read_conn(struct mg_connection *c, struct pkt *pkt) {
     }
     tx_tcp(c->mgr->ifp, s->mac, rem_ip, flags, c->loc.port, c->rem.port,
            mg_htonl(s->seq), mg_htonl(s->ack), "", 0);
-  } else if (pkt->pay.len == 0) {  // this is an ACK
+    if (pkt->pay.len == 0) return;  // if no data, we're done
+  } else if (pkt->pay.len == 0) {   // this is an ACK
     if (s->fin_rcvd && s->ttype == MIP_TTYPE_FIN) s->twclosure = true;
+    return;  // no data to process
   } else if (seq != s->ack) {
     uint32_t ack = (uint32_t) (mg_htonl(pkt->tcp->seq) + pkt->pay.len);
     if (s->ack == ack) {
@@ -700,44 +711,62 @@ static void read_conn(struct mg_connection *c, struct pkt *pkt) {
       tx_tcp(c->mgr->ifp, s->mac, rem_ip, TH_ACK, c->loc.port, c->rem.port,
              mg_htonl(s->seq), mg_htonl(s->ack), "", 0);
     }
+    return;  // drop it
   } else if (io->size - io->len < pkt->pay.len &&
              !mg_iobuf_resize(io, io->len + pkt->pay.len)) {
     mg_error(c, "oom");
+    return;  // drop it
+  }
+  // Copy TCP payload into the IO buffer. If the connection is plain text,
+  // we copy to c->recv. If the connection is TLS, this data is encrypted,
+  // therefore we copy that encrypted data to the c->rtls iobuffer instead,
+  // and then call mg_tls_recv() to decrypt it. NOTE: mg_tls_recv() will
+  // call back mg_io_recv() which grabs raw data from c->rtls
+  memcpy(&io->buf[io->len], pkt->pay.buf, pkt->pay.len);
+  io->len += pkt->pay.len;
+  MG_VERBOSE(("%lu SEQ %x -> %x", c->id, mg_htonl(pkt->tcp->seq), s->ack));
+  // Advance ACK counter
+  s->ack = (uint32_t) (mg_htonl(pkt->tcp->seq) + pkt->pay.len);
+  s->unacked += pkt->pay.len;
+  // size_t diff = s->acked <= s->ack ? s->ack - s->acked : s->ack;
+  if (s->unacked > MIP_TCP_WIN / 2 && s->acked != s->ack) {
+    // Send ACK immediately
+    MG_VERBOSE(("%lu imm ACK %lu", c->id, s->acked));
+    tx_tcp(c->mgr->ifp, s->mac, rem_ip, TH_ACK, c->loc.port, c->rem.port,
+           mg_htonl(s->seq), mg_htonl(s->ack), NULL, 0);
+    s->unacked = 0;
+    s->acked = s->ack;
+    if (s->ttype != MIP_TTYPE_KEEPALIVE) settmout(c, MIP_TTYPE_KEEPALIVE);
   } else {
-    // Copy TCP payload into the IO buffer. If the connection is plain text,
-    // we copy to c->recv. If the connection is TLS, this data is encrypted,
-    // therefore we copy that encrypted data to the c->rtls iobuffer instead,
-    // and then call mg_tls_recv() to decrypt it. NOTE: mg_tls_recv() will
-    // call back mg_io_recv() which grabs raw data from c->rtls
-    memcpy(&io->buf[io->len], pkt->pay.buf, pkt->pay.len);
-    io->len += pkt->pay.len;
+    // if not already running, setup a timer to send an ACK later
+    if (s->ttype != MIP_TTYPE_ACK) settmout(c, MIP_TTYPE_ACK);
+  }
+  if (c->is_tls && c->is_tls_hs) {
+    mg_tls_handshake(c);
+  } else if (c->is_tls) {
+    handle_tls_recv(c);
+  } else {
+    // Plain text connection, data is already in c->recv, trigger MG_EV_READ
+    mg_call(c, MG_EV_READ, &pkt->pay.len);
+  }
+}
 
-    MG_VERBOSE(("%lu SEQ %x -> %x", c->id, mg_htonl(pkt->tcp->seq), s->ack));
-    // Advance ACK counter
-    s->ack = (uint32_t) (mg_htonl(pkt->tcp->seq) + pkt->pay.len);
-    s->unacked += pkt->pay.len;
-    // size_t diff = s->acked <= s->ack ? s->ack - s->acked : s->ack;
-    if (s->unacked > MIP_TCP_WIN / 2 && s->acked != s->ack) {
-      // Send ACK immediately
-      MG_VERBOSE(("%lu imm ACK %lu", c->id, s->acked));
-      tx_tcp(c->mgr->ifp, s->mac, rem_ip, TH_ACK, c->loc.port, c->rem.port,
-             mg_htonl(s->seq), mg_htonl(s->ack), NULL, 0);
-      s->unacked = 0;
-      s->acked = s->ack;
-      if (s->ttype != MIP_TTYPE_KEEPALIVE) settmout(c, MIP_TTYPE_KEEPALIVE);
-    } else {
-      // if not already running, setup a timer to send an ACK later
-      if (s->ttype != MIP_TTYPE_ACK) settmout(c, MIP_TTYPE_ACK);
+// process options (MSS)
+static void handle_opt(struct connstate *s, struct tcp *tcp) {
+  uint8_t *opts = (uint8_t *) (tcp + 1);
+  int len = 4 * ((int) (tcp->off >> 4) - ((int) sizeof(*tcp) / 4));
+  s->dmss = 536;     // assume default, RFC-9293 3.7.1
+  while (len > 0) {  // RFC-9293 3.1 3.2
+    uint8_t kind = opts[0], optlen = 1;
+    if (kind != 1) {         // No-Operation
+      if (kind == 0) break;  // End of Option List
+      optlen = opts[1];
+      if (kind == 2 && optlen == 4)  // set received MSS
+        s->dmss = (uint16_t) (((uint16_t) opts[2] << 8) + opts[3]);
     }
-
-    if (c->is_tls && c->is_tls_hs) {
-      mg_tls_handshake(c);
-    } else if (c->is_tls) {
-      handle_tls_recv(c);
-    } else {
-      // Plain text connection, data is already in c->recv, trigger MG_EV_READ
-      mg_call(c, MG_EV_READ, &pkt->pay.len);
-    }
+    MG_VERBOSE(("kind: %u, optlen: %u, len: %d\n", kind, optlen, len));
+    opts += optlen;
+    len -= optlen;
   }
 }
 
@@ -748,6 +777,7 @@ static void rx_tcp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   MG_INFO(("%lu %hhu %d", c ? c->id : 0, pkt->tcp->flags, (int) pkt->pay.len));
 #endif
   if (c != NULL && c->is_connecting && pkt->tcp->flags == (TH_SYN | TH_ACK)) {
+    handle_opt(s, pkt->tcp);  // process options (MSS)
     s->seq = mg_ntohl(pkt->tcp->ack), s->ack = mg_ntohl(pkt->tcp->seq) + 1;
     tx_tcp_pkt(ifp, pkt, TH_ACK, pkt->tcp->ack, NULL, 0);
     c->is_connecting = 0;  // Client connected
@@ -777,6 +807,8 @@ static void rx_tcp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
     if (c->is_accepted) mg_error(c, "peer RST");  // RFC-1122 4.2.2.13
     // ignore RST if not connected
   } else if (pkt->tcp->flags & TH_SYN) {
+    // TODO(): handle_opt(s, pkt->tcp);  // process options (MSS)
+    // At this point, s = NULL, there is no connection.
     // Use peer's source port as ISN, in order to recognise the handshake
     uint32_t isn = mg_htonl((uint32_t) mg_ntohs(pkt->tcp->sport));
     tx_tcp_pkt(ifp, pkt, TH_SYN | TH_ACK, isn, NULL, 0);
@@ -914,24 +946,27 @@ static void mg_tcpip_poll(struct mg_tcpip_if *ifp, uint64_t now) {
     ifp->state = MG_TCPIP_STATE_READY;  // keep best-effort MAC
     onstatechange(ifp);
   }
-  // Handle physical interface up/down status
-  if (expired_1000ms && ifp->driver->up) {
-    bool up = ifp->driver->up(ifp);
-    bool current = ifp->state != MG_TCPIP_STATE_DOWN;
-    if (!up && ifp->enable_dhcp_client) ifp->ip = 0;
-    if (up != current) {  // link state has changed
-      ifp->state = up == false ? MG_TCPIP_STATE_DOWN
-                   : ifp->enable_dhcp_client || ifp->ip == 0
-                       ? MG_TCPIP_STATE_UP
-                       : MG_TCPIP_STATE_IP;
-      onstatechange(ifp);
-    } else if (!ifp->enable_dhcp_client && ifp->state == MG_TCPIP_STATE_UP &&
-               ifp->ip) {
-      ifp->state = MG_TCPIP_STATE_IP;  // ifp->fn has set an IP
-      onstatechange(ifp);
+  // poll driver
+  if (ifp->driver->poll) {
+    bool up = ifp->driver->poll(ifp, expired_1000ms);
+    // Handle physical interface up/down status
+    if (expired_1000ms) {
+      bool current = ifp->state != MG_TCPIP_STATE_DOWN;
+      if (!up && ifp->enable_dhcp_client) ifp->ip = 0;
+      if (up != current) {  // link state has changed
+        ifp->state = up == false ? MG_TCPIP_STATE_DOWN
+                     : ifp->enable_dhcp_client || ifp->ip == 0
+                         ? MG_TCPIP_STATE_UP
+                         : MG_TCPIP_STATE_IP;
+        onstatechange(ifp);
+      } else if (!ifp->enable_dhcp_client && ifp->state == MG_TCPIP_STATE_UP &&
+                 ifp->ip) {
+        ifp->state = MG_TCPIP_STATE_IP;  // ifp->fn has set an IP
+        onstatechange(ifp);
+      }
+      if (ifp->state == MG_TCPIP_STATE_DOWN) MG_ERROR(("Network is down"));
+      mg_tcpip_call(ifp, MG_TCPIP_EV_TIMER_1S, NULL);
     }
-    if (ifp->state == MG_TCPIP_STATE_DOWN) MG_ERROR(("Network is down"));
-    mg_tcpip_call(ifp, MG_TCPIP_EV_TIMER_1S, NULL);
   }
   if (ifp->state == MG_TCPIP_STATE_DOWN) return;
 
@@ -953,14 +988,14 @@ static void mg_tcpip_poll(struct mg_tcpip_if *ifp, uint64_t now) {
   }
 
   // Read data from the network
-  if (ifp->driver->rx != NULL) {  // Polling driver. We must call it
+  if (ifp->driver->rx != NULL) {  // Simple polling driver, returns one frame
     size_t len =
         ifp->driver->rx(ifp->recv_queue.buf, ifp->recv_queue.size, ifp);
     if (len > 0) {
       ifp->nrecv++;
       mg_tcpip_rx(ifp, ifp->recv_queue.buf, len);
     }
-  } else {  // Interrupt-based driver. Fills recv queue itself
+  } else {  // Complex poll / Interrupt-based driver. Queues recvd frames
     char *buf;
     size_t len = mg_queue_next(&ifp->recv_queue, &buf);
     if (len > 0) {
@@ -1029,6 +1064,12 @@ void mg_tcpip_init(struct mg_mgr *mgr, struct mg_tcpip_if *ifp) {
     MG_INFO(("MAC not set. Generated random: %M", mg_print_mac, ifp->mac));
   }
 
+  // If DHCP name is not set, use "mip"
+  if (ifp->dhcp_name[0] == '\0') {
+    memcpy(ifp->dhcp_name, "mip", 4);
+  }
+  ifp->dhcp_name[sizeof(ifp->dhcp_name) - 1] = '\0';  // Just in case
+
   if (ifp->driver->init && !ifp->driver->init(ifp)) {
     MG_ERROR(("driver init failed"));
   } else {
@@ -1075,6 +1116,13 @@ static void mac_resolved(struct mg_connection *c) {
   }
 }
 
+static void ip4_mcastmac(uint8_t *mac, uint32_t *ip) {
+  uint8_t mcastp[3] = {0x01, 0x00, 0x5E};  // multicast group MAC
+  memcpy(mac, mcastp, 3);
+  memcpy(mac + 3, ((uint8_t *) ip) + 1, 3);  // 23 LSb
+  mac[3] &= 0x7F;
+}
+
 void mg_connect_resolved(struct mg_connection *c) {
   struct mg_tcpip_if *ifp = c->mgr->ifp;
   uint32_t rem_ip;
@@ -1100,10 +1148,7 @@ void mg_connect_resolved(struct mg_connection *c) {
     c->is_arplooking = 1;
   } else if ((*((uint8_t *) &rem_ip) & 0xE0) == 0xE0) {
     struct connstate *s = (struct connstate *) (c + 1);  // 224 to 239, E0 to EF
-    uint8_t mcastp[3] = {0x01, 0x00, 0x5E};              // multicast group
-    memcpy(s->mac, mcastp, 3);
-    memcpy(s->mac + 3, ((uint8_t *) &rem_ip) + 1, 3);  // 23 LSb
-    s->mac[3] &= 0x7F;
+    ip4_mcastmac(s->mac, &rem_ip);                       // multicast group
     mac_resolved(c);
   } else {
     struct connstate *s = (struct connstate *) (c + 1);
@@ -1114,6 +1159,10 @@ void mg_connect_resolved(struct mg_connection *c) {
 
 bool mg_open_listener(struct mg_connection *c, const char *url) {
   c->loc.port = mg_htons(mg_url_port(url));
+  if (!mg_aton(mg_url_host(url), &c->loc)) {
+    MG_ERROR(("invalid listening URL: %s", url));
+    return false;
+  }
   return true;
 }
 
@@ -1201,4 +1250,12 @@ bool mg_send(struct mg_connection *c, const void *buf, size_t len) {
   }
   return res;
 }
+
+uint8_t mcast_addr[6] = {0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb};
+void mg_multicast_add(struct mg_connection *c, char *ip) {
+  (void) ip;  // ip4_mcastmac(mcast_mac, &ip);
+  // TODO(): actual IP -> MAC; check database, update
+  c->mgr->ifp->update_mac_hash_table = true;  // mark dirty
+}
+
 #endif  // MG_ENABLE_TCPIP

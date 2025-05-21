@@ -80,7 +80,6 @@ static void test_poll(void) {
   mg_http_listen(&mgr, "http://127.0.0.1:12346", ph, &count);
   for (i = 0; i < 10; i++) mg_mgr_poll(&mgr, 0);
   ASSERT(count == 10);
-  mg_tcpip_free(&mif);
   mg_mgr_free(&mgr);
 }
 
@@ -103,8 +102,8 @@ static size_t if_tx(const void *buf, size_t len, struct mg_tcpip_if *ifp) {
   return len;
 }
 
-static bool if_up(struct mg_tcpip_if *ifp) {
-  return ifp->driver_data ? true : false;
+static bool if_poll(struct mg_tcpip_if *ifp, bool s1) {
+  return s1 && ifp->driver_data ? true : false;
 }
 
 static size_t if_rx(void *buf, size_t len, struct mg_tcpip_if *ifp) {
@@ -168,7 +167,7 @@ static void test_retransmit(void) {
   mg_mgr_init(&mgr);
   memset(&mif, 0, sizeof(mif));
   memset(&s_driver_data, 0, sizeof(struct driver_data));
-  driver.init = NULL, driver.tx = if_tx, driver.up = if_up, driver.rx = if_rx;
+  driver.init = NULL, driver.tx = if_tx, driver.poll = if_poll, driver.rx = if_rx;
   mif.driver = &driver;
   mif.driver_data = &s_driver_data;
   mg_tcpip_init(&mgr, &mif);
@@ -240,7 +239,6 @@ static void test_retransmit(void) {
 
   s_driver_data.len = 0;
   mg_mgr_free(&mgr);
-  mg_tcpip_free(&mif);
 }
 
 static void test_frag_recv_path(void) {
@@ -254,7 +252,7 @@ static void test_frag_recv_path(void) {
   mg_mgr_init(&mgr);
   memset(&mif, 0, sizeof(mif));
   memset(&s_driver_data, 0, sizeof(struct driver_data));
-  driver.init = NULL, driver.tx = if_tx, driver.up = if_up, driver.rx = if_rx;
+  driver.init = NULL, driver.tx = if_tx, driver.poll = if_poll, driver.rx = if_rx;
   mif.driver = &driver;
   mif.driver_data = &s_driver_data;
   mg_tcpip_init(&mgr, &mif);
@@ -284,7 +282,6 @@ static void test_frag_recv_path(void) {
 
   s_driver_data.len = 0;
   mg_mgr_free(&mgr);
-  mg_tcpip_free(&mif);
 }
 
 static void test_frag_send_path(void) {
@@ -295,7 +292,7 @@ static void test_frag_send_path(void) {
   mg_mgr_init(&mgr);
   memset(&mif, 0, sizeof(mif));
   memset(&s_driver_data, 0, sizeof(struct driver_data));
-  driver.init = NULL, driver.tx = if_tx, driver.up = if_up, driver.rx = if_rx;
+  driver.init = NULL, driver.tx = if_tx, driver.poll = if_poll, driver.rx = if_rx;
   mif.driver = &driver;
   mif.driver_data = &s_driver_data;
   mg_tcpip_init(&mgr, &mif);
@@ -307,7 +304,6 @@ static void test_frag_send_path(void) {
   ASSERT(s_seg_sent == 3);
   s_driver_data.len = 0;
   mg_mgr_free(&mgr);
-  mg_tcpip_free(&mif);
 }
 
 static void test_fragmentation(void) {
