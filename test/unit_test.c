@@ -811,6 +811,7 @@ static void wcb(struct mg_connection *c, int ev, void *ev_data) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
     struct mg_str *wsproto = mg_http_get_header(hm, "Sec-WebSocket-Protocol");
     ASSERT(wsproto != NULL);
+    mg_ws_send(c, "hello", 0, 0);
     mg_ws_printf(c, WEBSOCKET_OP_BINARY, "%.3s", "boo!!!!");
     mg_ws_printf(c, WEBSOCKET_OP_BINARY, "%s", "foobar");
     mg_ws_send(c, "", 0, WEBSOCKET_OP_PING);
@@ -1960,6 +1961,22 @@ static void test_timer(void) {
     ASSERT(mgr.timers == NULL);
     ASSERT(mgr.conns == NULL);
   }
+
+  // Test that non-repeating called timers are deleted, see #2768
+  {
+    struct mg_mgr mgr;
+    int arg = 0;
+    mg_mgr_init(&mgr);
+    mg_timer_add(&mgr, 0, MG_TIMER_ONCE, f1, &arg);
+    ASSERT(mgr.timers != NULL);
+    mg_mgr_poll(&mgr, 10);
+    ASSERT(arg == 1);
+    ASSERT(mgr.timers == NULL);
+    mg_mgr_free(&mgr);
+    ASSERT(mgr.timers == NULL);
+    ASSERT(mgr.conns == NULL);
+  }
+
 }
 
 static bool sn(const char *fmt, ...) {
@@ -2402,6 +2419,26 @@ static void test_dns(void) {
     ASSERT(strcmp(dm.name, "new-fp-shed.wg1.b.yahoo.com") == 0);
   }
 
+  {
+    // DNS Query for domain abc.local
+    // 0000   00 00 00 00 00 01 00 00 00 00 00 00 03 61 62 63   .............abc
+    // 0010   05 6c 6f 63 61 6c 00 00 01 00 01                  .local.....
+    uint8_t d[] = {
+      0x00, 0x00, // txid: 0
+      0x00, 0x00, // flags: 0 (Query flag = 0)
+      0x00, 0x01, // numQuestions: 1
+      0x00, 0x00, // numAnswers: 1
+      0x00, 0x00, 0x00, 0x00, // additional RRs
+      0x03, 0x61, 0x62, 0x63, // "abc"
+      0x05, 0x6c, 0x6f, 0x63, 0x61, 0x6c, // "local"
+      0x00, 0x00, 0x01, 0x00, 0x01 // domain end, type, class
+    };
+    memset(&dm, 0, sizeof(dm));
+    ASSERT(mg_dns_parse(d, sizeof(d), &dm) == 1);
+    ASSERT(dm.resolved == false);
+    ASSERT(strcmp(dm.name, "abc.local") == 0);
+  }
+
   test_dns_error("udp://127.0.0.1:12345", "DNS timeout");
   test_dns_error("", "resolver");
   test_dns_error("tcp://0.0.0.0:0", "DNS error");
@@ -2412,6 +2449,7 @@ static void test_util(void) {
   char buf[100], *s;
   struct mg_addr a;
   uint32_t ipv4;
+  uint16_t port;
   struct mg_str data;
   memset(&a, 0xa5, sizeof(a));
   ASSERT(mg_file_printf(&mg_fs_posix, "data.txt", "%s", "hi") == true);
@@ -2429,6 +2467,18 @@ static void test_util(void) {
   ASSERT(a.is_ip6 == false);
   memcpy(&ipv4, a.ip, sizeof(ipv4));
   ASSERT(ipv4 == mg_htonl(0x7f000001));
+  ASSERT(mg_ntohl(ipv4) == 0x7f000001);
+  MG_STORE_BE32(&ipv4, 0x5678abcd);
+  ASSERT(((uint8_t *)&ipv4)[0] == 0x56 && ((uint8_t *)&ipv4)[1] == 0x78 && ((uint8_t *)&ipv4)[2] == 0xab && ((uint8_t *)&ipv4)[3] == 0xcd);
+  ASSERT(MG_LOAD_BE32(&ipv4) == 0x5678abcd);
+  MG_STORE_BE16(&port, 0x1234);
+  ASSERT(((uint8_t *)&port)[0] == 0x12 && ((uint8_t *)&port)[1] == 0x34);
+  ASSERT(MG_LOAD_BE16(&port) == 0x1234);
+  ASSERT(port == mg_htons(0x1234));
+  ASSERT(mg_ntohs(port) == 0x1234);
+  MG_STORE_BE24(&ipv4, 0xef2345);
+  ASSERT(((uint8_t *)&ipv4)[0] == 0xef && ((uint8_t *)&ipv4)[1] == 0x23 && ((uint8_t *)&ipv4)[2] == 0x45);
+  ASSERT(MG_LOAD_BE24(&ipv4) == 0xef2345);
 
   memset(a.ip, 0xa5, sizeof(a.ip));
   ASSERT(mg_aton(mg_str("1:2:3:4:5:6:7:8"), &a) == true);
@@ -3587,6 +3637,63 @@ static void test_sha1(void) {
   test_sha1_str(")_)+_)!&^*%$#>>>{}}}{{{][[[[]]]", expected_hash_3);
 }
 
+static void test_sha256_str(const char *string,
+                            const unsigned char *expected_hash) {
+  unsigned char digest[32];
+  mg_sha256(digest, (unsigned char *) string, strlen(string));
+  ASSERT((memcmp(digest, expected_hash, 32) == 0));
+}
+
+static void test_sha256(void) {
+  const unsigned char expected_hash_1[] = {
+      0xe3, 0xb0, 0xc4, 0x42, 0x98, 0xfc, 0x1c, 0x14, 0x9a, 0xfb, 0xf4,
+      0xc8, 0x99, 0x6f, 0xb9, 0x24, 0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b,
+      0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55};
+  const unsigned char expected_hash_2[] = {
+      0xbc, 0x07, 0x32, 0x21, 0x17, 0x8e, 0x81, 0xbd, 0x2f, 0x67, 0x13,
+      0x3a, 0xca, 0xb4, 0x07, 0xad, 0x5b, 0x61, 0x8b, 0x33, 0xd2, 0x95,
+      0x9e, 0x94, 0x45, 0x45, 0xdc, 0x24, 0x99, 0x0a, 0xff, 0x92};
+  const unsigned char expected_hash_3[] = {
+      0x1b, 0x65, 0x3e, 0xda, 0x9a, 0x2a, 0x24, 0x55, 0xa3, 0x56, 0x38,
+      0x08, 0xf4, 0xf7, 0xc5, 0xa6, 0xc5, 0x2d, 0x2c, 0xb1, 0x71, 0xe5,
+      0x90, 0x4c, 0x83, 0x9c, 0x77, 0x92, 0x51, 0xa2, 0x84, 0x4a};
+  test_sha256_str("", expected_hash_1);
+  test_sha256_str(
+      "#&*%$DHFH(0x12345)^&*(^!@$%^^&&*1298**&^%DHKSHFLS)(*)&^^%$#!!!!",
+      expected_hash_2);
+  test_sha256_str(")_)+_)!&^*%$#>>>{}}}{{{][[[[]]]", expected_hash_3);
+}
+
+static void test_sha384_str(const char *string,
+                            const unsigned char *expected_hash) {
+  unsigned char digest[48];
+  mg_sha384(digest, (unsigned char *) string, strlen(string));
+  ASSERT((memcmp(digest, expected_hash, 48) == 0));
+}
+
+static void test_sha384(void) {
+  const unsigned char expected_hash_1[] = {
+      0x38, 0xb0, 0x60, 0xa7, 0x51, 0xac, 0x96, 0x38, 0x4c, 0xd9, 0x32, 0x7e,
+      0xb1, 0xb1, 0xe3, 0x6a, 0x21, 0xfd, 0xb7, 0x11, 0x14, 0xbe, 0x07, 0x43,
+      0x4c, 0x0c, 0xc7, 0xbf, 0x63, 0xf6, 0xe1, 0xda, 0x27, 0x4e, 0xde, 0xbf,
+      0xe7, 0x6f, 0x65, 0xfb, 0xd5, 0x1a, 0xd2, 0xf1, 0x48, 0x98, 0xb9, 0x5b};
+  const unsigned char expected_hash_2[] = {
+      0x77, 0xe7, 0x0a, 0x31, 0xe5, 0xcd, 0x68, 0xa4, 0xc5, 0xb3, 0x70, 0x55,
+      0x38, 0xd0, 0x90, 0xb0, 0xcd, 0xb6, 0xf4, 0x1c, 0x2e, 0xe6, 0xf4, 0xdd,
+      0xf6, 0xb4, 0xfc, 0x97, 0x01, 0x79, 0x3c, 0x89, 0x82, 0x3b, 0x13, 0xa2,
+      0x48, 0xa7, 0xfe, 0xd2, 0xd0, 0xc4, 0xbf, 0xed, 0x85, 0xb6, 0x20, 0xc7};
+  const unsigned char expected_hash_3[] = {
+      0x45, 0xa1, 0xc6, 0x4d, 0x99, 0x29, 0x42, 0x87, 0x49, 0x46, 0x73, 0x3c,
+      0x3b, 0xc8, 0xbc, 0x9c, 0x43, 0x10, 0x75, 0x23, 0x89, 0x22, 0x04, 0x41,
+      0xcd, 0xa3, 0x34, 0xeb, 0x97, 0x9f, 0x2a, 0xbf, 0x17, 0x94, 0x38, 0x72,
+      0x6b, 0xd8, 0x8e, 0xcc, 0xb5, 0x50, 0xc6, 0x5b, 0x35, 0x1f, 0x91, 0x90};
+  test_sha384_str("", expected_hash_1);
+  test_sha384_str(
+      "#&*%$DHFH(0x12345)^&*(^!@$%^^&&*1298**&^%DHKSHFLS)(*)&^^%$#!!!!",
+      expected_hash_2);
+  test_sha384_str(")_)+_)!&^*%$#>>>{}}}{{{][[[[]]]", expected_hash_3);
+}
+
 static void test_split(void) {
   struct mg_str a, b, s;
 
@@ -3638,7 +3745,8 @@ static void test_split(void) {
   ASSERT(mg_strcmp(b, mg_str("")) == 0);
 }
 
-static void test_crypto(void) {
+static void test_x25519(void) {
+#if MG_TLS == MG_TLS_BUILTIN
   uint8_t key[X25519_BYTES];
   uint8_t buf[X25519_BYTES];
   char tmp[100];
@@ -3649,6 +3757,15 @@ static void test_crypto(void) {
   mg_snprintf(tmp, sizeof(tmp), "%M", mg_print_hex, sizeof(buf), buf);
   MG_INFO(("%s", tmp));
   ASSERT(mg_strcmp(mg_str("8f40c5adb6"), mg_str_n(tmp, 10)) == 0);
+#endif
+}
+
+static void test_crypto(void) {
+  test_md5();
+  test_sha1();
+  test_sha256();
+  test_sha384();
+  test_x25519();
 }
 
 int main(void) {
@@ -3698,8 +3815,6 @@ int main(void) {
   (void) test_sntp, (void) test_mqtt, (void) test_http_client;
 #endif
   test_poll();
-  test_md5();
-  test_sha1();
   printf("SUCCESS. Total tests: %d\n", s_num_tests);
 
   return EXIT_SUCCESS;

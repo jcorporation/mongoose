@@ -5,26 +5,33 @@
 #include "queue.h"
 #include "str.h"
 
+#if MG_ENABLE_TCPIP
+
 struct mg_tcpip_if;  // Mongoose TCP/IP network interface
 
 struct mg_tcpip_driver {
   bool (*init)(struct mg_tcpip_if *);                         // Init driver
   size_t (*tx)(const void *, size_t, struct mg_tcpip_if *);   // Transmit frame
   size_t (*rx)(void *buf, size_t len, struct mg_tcpip_if *);  // Receive frame
-  bool (*up)(struct mg_tcpip_if *);                           // Up/down status
+  bool (*poll)(struct mg_tcpip_if *, bool);  // Poll, return Up/down status
 };
 
 typedef void (*mg_tcpip_event_handler_t)(struct mg_tcpip_if *ifp, int ev,
                                          void *ev_data);
 
 enum {
-  MG_TCPIP_EV_ST_CHG,     // state change             uint8_t * (&ifp->state)
-  MG_TCPIP_EV_DHCP_DNS,   // DHCP DNS assignment      uint32_t *ipaddr
-  MG_TCPIP_EV_DHCP_SNTP,  // DHCP SNTP assignment     uint32_t *ipaddr
-  MG_TCPIP_EV_ARP,        // Got ARP packet           struct mg_str *
-  MG_TCPIP_EV_TIMER_1S,   // 1 second timer           NULL
-  MG_TCPIP_EV_USER        // Starting ID for user events
+  MG_TCPIP_EV_ST_CHG,           // state change                   uint8_t * (&ifp->state)
+  MG_TCPIP_EV_DHCP_DNS,         // DHCP DNS assignment            uint32_t *ipaddr
+  MG_TCPIP_EV_DHCP_SNTP,        // DHCP SNTP assignment           uint32_t *ipaddr
+  MG_TCPIP_EV_ARP,              // Got ARP packet                 struct mg_str *
+  MG_TCPIP_EV_TIMER_1S,         // 1 second timer                 NULL
+  MG_TCPIP_EV_WIFI_SCAN_RESULT, // Wi-Fi scan results             struct mg_wifi_scan_bss_data *
+  MG_TCPIP_EV_WIFI_SCAN_END,    // Wi-Fi scan has finished        NULL
+  MG_TCPIP_EV_WIFI_CONNECT_ERR, // Wi-Fi connect has failed       driver and chip specific
+  MG_TCPIP_EV_DRIVER,           // Driver event                   driver specific
+  MG_TCPIP_EV_USER              // Starting ID for user events
 };
+
 
 // Network interface
 struct mg_tcpip_if {
@@ -38,11 +45,13 @@ struct mg_tcpip_if {
   bool enable_req_sntp;            // DCHP client requests SNTP server
   bool enable_crc32_check;         // Do a CRC check on RX frames and strip it
   bool enable_mac_check;           // Do a MAC check on RX frames
+  bool update_mac_hash_table;      // Signal drivers to update MAC controller
   struct mg_tcpip_driver *driver;  // Low level driver
   void *driver_data;               // Driver-specific data
   mg_tcpip_event_handler_t fn;     // User-specified event handler function
   struct mg_mgr *mgr;              // Mongoose event manager
   struct mg_queue recv_queue;      // Receive queue
+  char dhcp_name[12];              // Name reported to DHCP, "mip" if unset
   uint16_t mtu;                    // Interface MTU
 #define MG_TCPIP_MTU_DEFAULT 1500
 
@@ -71,6 +80,7 @@ void mg_tcpip_arp_request(struct mg_tcpip_if *ifp, uint32_t ip, uint8_t *mac);
 
 extern struct mg_tcpip_driver mg_tcpip_driver_stm32f;
 extern struct mg_tcpip_driver mg_tcpip_driver_w5500;
+extern struct mg_tcpip_driver mg_tcpip_driver_w5100;
 extern struct mg_tcpip_driver mg_tcpip_driver_tm4c;
 extern struct mg_tcpip_driver mg_tcpip_driver_tms570;
 extern struct mg_tcpip_driver mg_tcpip_driver_stm32h;
@@ -83,6 +93,7 @@ extern struct mg_tcpip_driver mg_tcpip_driver_xmc7;
 extern struct mg_tcpip_driver mg_tcpip_driver_ppp;
 extern struct mg_tcpip_driver mg_tcpip_driver_pico_w;
 extern struct mg_tcpip_driver mg_tcpip_driver_rw612;
+extern struct mg_tcpip_driver mg_tcpip_driver_cyw;
 
 // Drivers that require SPI, can use this SPI abstraction
 struct mg_tcpip_spi {
@@ -91,3 +102,5 @@ struct mg_tcpip_spi {
   void (*end)(void *);              // SPI end: slave select high
   uint8_t (*txn)(void *, uint8_t);  // SPI transaction: write 1 byte, read reply
 };
+
+#endif

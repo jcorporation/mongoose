@@ -1,7 +1,7 @@
-#include "net.h"
 #include "dns.h"
 #include "fmt.h"
 #include "log.h"
+#include "net.h"
 #include "printf.h"
 #include "profile.h"
 #include "timer.h"
@@ -218,8 +218,8 @@ struct mg_timer *mg_timer_add(struct mg_mgr *mgr, uint64_t milliseconds,
                               unsigned flags, void (*fn)(void *), void *arg) {
   struct mg_timer *t = (struct mg_timer *) calloc(1, sizeof(*t));
   if (t != NULL) {
+    flags |= MG_TIMER_AUTODELETE;  // We have calloc-ed it, so autodelete
     mg_timer_init(&mgr->timers, t, milliseconds, flags, fn, arg);
-    t->id = mgr->timerid++;
   }
   return t;
 }
@@ -247,6 +247,9 @@ void mg_mgr_free(struct mg_mgr *mgr) {
   if (mgr->epoll_fd >= 0) close(mgr->epoll_fd), mgr->epoll_fd = -1;
 #endif
   mg_tls_ctx_free(mgr);
+#if MG_ENABLE_TCPIP
+  if (mgr->ifp) mg_tcpip_free(mgr->ifp);
+#endif
 }
 
 void mg_mgr_init(struct mg_mgr *mgr) {

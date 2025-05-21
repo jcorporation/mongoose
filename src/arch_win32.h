@@ -2,6 +2,18 @@
 
 #if MG_ARCH == MG_ARCH_WIN32
 
+// Avoid name clashing; (macro expansion producing 'defined' has undefined
+// behaviour). See config.h for user options
+#ifndef MG_ENABLE_WINSOCK
+#if (!defined(MG_ENABLE_TCPIP) || !MG_ENABLE_TCPIP) && \
+    (!defined(MG_ENABLE_LWIP) || !MG_ENABLE_LWIP) &&   \
+    (!defined(MG_ENABLE_FREERTOS_TCP) || !MG_ENABLE_FREERTOS_TCP)
+#define MG_ENABLE_WINSOCK 1
+#else
+#define MG_ENABLE_WINSOCK 0
+#endif
+#endif
+
 #ifndef _CRT_RAND_S
 #define _CRT_RAND_S
 #endif
@@ -47,12 +59,14 @@ typedef enum { false = 0, true = 1 } bool;
 #else
 #include <stdbool.h>
 #include <stdint.h>
+#if MG_ENABLE_WINSOCK
 #include <ws2tcpip.h>
+#endif
 #endif
 
 #include <process.h>
 #include <winerror.h>
-#include <winsock2.h>
+#include <winsock2.h>       // fix missing macros and types
 
 // For mg_random()
 #if defined(_MSC_VER) && _MSC_VER < 1700
@@ -61,6 +75,20 @@ typedef enum { false = 0, true = 1 } bool;
 #endif
 #include <wincrypt.h>
 #pragma comment(lib, "advapi32.lib")
+#endif
+
+#if defined(_MSC_VER) && _MSC_VER <= 1200
+  #ifndef IPPROTO_IP
+    #define IPPROTO_IP 0
+  #endif
+
+  #ifndef IP_ADD_MEMBERSHIP
+    struct ip_mreq {
+        struct in_addr imr_multiaddr;
+        struct in_addr imr_interface;
+    };
+    #define IP_ADD_MEMBERSHIP  12
+  #endif
 #endif
 
 // Protect from calls like std::snprintf in app code
@@ -73,24 +101,29 @@ typedef enum { false = 0, true = 1 } bool;
 #endif
 #endif
 
-#define MG_INVALID_SOCKET INVALID_SOCKET
-#define MG_SOCKET_TYPE SOCKET
 typedef unsigned long nfds_t;
 #if defined(_MSC_VER)
+#if MG_ENABLE_WINSOCK
 #pragma comment(lib, "ws2_32.lib")
+#endif
 #ifndef alloca
 #define alloca(a) _alloca(a)
 #endif
 #endif
-#define poll(a, b, c) WSAPoll((a), (b), (c))
-#define closesocket(x) closesocket(x)
 
-typedef int socklen_t;
 #define MG_DIRSEP '\\'
 
 #ifndef MG_PATH_MAX
 #define MG_PATH_MAX FILENAME_MAX
 #endif
+
+#if MG_ENABLE_WINSOCK
+
+#define MG_INVALID_SOCKET INVALID_SOCKET
+#define MG_SOCKET_TYPE SOCKET
+#define poll(a, b, c) WSAPoll((a), (b), (c))
+#define closesocket(x) closesocket(x)
+typedef int socklen_t;
 
 #ifndef SO_EXCLUSIVEADDRUSE
 #define SO_EXCLUSIVEADDRUSE ((int) (~SO_REUSEADDR))
@@ -106,13 +139,15 @@ typedef int socklen_t;
 #define MG_SOCK_RESET(errcode) \
   (((errcode) < 0) && (WSAGetLastError() == WSAECONNRESET))
 
+#endif  // MG_ENABLE_WINSOCK
+
 #define realpath(a, b) _fullpath((b), (a), MG_PATH_MAX)
-#define sleep(x) Sleep((x) * 1000)
+#define sleep(x) Sleep((x) *1000)
 #define mkdir(a, b) _mkdir(a)
 #define timegm(x) _mkgmtime(x)
 
 #ifndef S_ISDIR
-#define S_ISDIR(x) (((x) & _S_IFMT) == _S_IFDIR)
+#define S_ISDIR(x) (((x) &_S_IFMT) == _S_IFDIR)
 #endif
 
 #ifndef MG_ENABLE_DIRLIST
