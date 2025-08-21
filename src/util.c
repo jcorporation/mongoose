@@ -17,6 +17,13 @@ bool mg_random(void *buf, size_t len) {
 #if MG_ARCH == MG_ARCH_ESP32
   while (len--) *p++ = (unsigned char) (esp_random() & 255);
   success = true;
+#elif MG_ARCH == MG_ARCH_CUBE && defined(HAL_RNG_MODULE_ENABLED)
+  extern RNG_HandleTypeDef hrng;
+  for (size_t n = 0; n < len; n += sizeof(uint32_t)) {
+    uint32_t r = HAL_RNG_ReadLastRandomNumber(&hrng);
+    memcpy((char *) buf + n, &r, n + sizeof(r) > len ? len - n : sizeof(r));
+  }
+  success = true;
 #elif MG_ARCH == MG_ARCH_PICOSDK
   while (len--) *p++ = (unsigned char) (get_rand_32() & 255);
   success = true;
@@ -147,7 +154,9 @@ uint64_t mg_millis(void) {
 #elif MG_ARCH == MG_ARCH_ESP8266 || MG_ARCH == MG_ARCH_ESP32 || \
     MG_ARCH == MG_ARCH_FREERTOS
   return xTaskGetTickCount() * portTICK_PERIOD_MS;
-#elif MG_ARCH == MG_ARCH_AZURERTOS
+#elif MG_ARCH == MG_ARCH_CUBE
+  return (uint64_t) HAL_GetTick();
+#elif MG_ARCH == MG_ARCH_THREADX
   return tx_time_get() * (1000 /* MS per SEC */ / TX_TIMER_TICKS_PER_SECOND);
 #elif MG_ARCH == MG_ARCH_TIRTOS
   return (uint64_t) Clock_getTicks();
@@ -199,3 +208,15 @@ void mg_delayms(unsigned int ms) {
   uint64_t to = mg_millis() + ms + 1;
   while (mg_millis() < to) (void) 0;
 }
+
+
+#if MG_ENABLE_CUSTOM_CALLOC
+#else
+void *mg_calloc(size_t count, size_t size) {
+  return calloc(count, size);
+}
+
+void mg_free(void *ptr) {
+  free(ptr);
+}
+#endif

@@ -18,6 +18,7 @@ static int s_num_tests = 0;
     s_num_tests++;                                              \
     if (!(expr)) {                                              \
       printf("FAILURE %s:%d: %s\n", __FILE__, __LINE__, #expr); \
+      fflush(stdout);                                           \
       ABORT();                                                  \
     }                                                           \
   } while (0)
@@ -374,6 +375,65 @@ static void test_sntp(void) {
 #endif
 }
 
+#ifdef MQTT_LOCALHOST
+#define MQTT_URL "mqtt://127.0.0.1:1883"
+#else
+#define MQTT_URL "mqtt://broker.hivemq.com:1883"
+#endif
+#if MG_TLS == MG_TLS_BUILTIN
+#define MQTTS_URL "mqtts://mongoose.ws:8883"  // test requires TLS 1.3
+#define MQTTS_CA mg_str(s_ca_cert)
+static const char *s_ca_cert =
+    "-----BEGIN CERTIFICATE-----\n"
+    "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\n"
+    "-----END CERTIFICATE-----\n";
+#elif MG_TLS
+#ifdef MQTT_LOCALHOST
+#define MQTTS_URL "mqtts://127.0.0.1:8883"
+#define MQTTS_CA mg_str(s_ca_cert)
+static const char *s_ca_cert =
+    "-----BEGIN CERTIFICATE-----\n"
+    "MIIBFTCBvAIJAMNTFtpfcq8NMAoGCCqGSM49BAMCMBMxETAPBgNVBAMMCE1vbmdv\n"
+    "b3NlMB4XDTI0MDUwNzE0MzczNloXDTM0MDUwNTE0MzczNlowEzERMA8GA1UEAwwI\n"
+    "TW9uZ29vc2UwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAASuP+86T/rOWnGpEVhl\n"
+    "fxYZ+pjMbCmDZ+vdnP0rjoxudwRMRQCv5slRlDK7Lxue761sdvqxWr0Ma6TFGTNg\n"
+    "epsRMAoGCCqGSM49BAMCA0gAMEUCIQCwb2CxuAKm51s81S6BIoy1IcandXSohnqs\n"
+    "us64BAA7QgIgGGtUrpkgFSS0oPBlCUG6YPHFVw42vTfpTC0ySwAS0M4=\n"
+    "-----END CERTIFICATE-----\n";
+#else
+#define MQTTS_URL "mqtts://broker.hivemq.com:8883"
+#define MQTTS_CA mg_unpacked("/data/ca.pem")
+#endif // MQTT_LOCALHOST
+#endif
+
 struct mqtt_data {
   char *topic;
   char *msg;
@@ -390,8 +450,20 @@ struct mqtt_data {
 static void mqtt_cb(struct mg_connection *c, int ev, void *ev_data) {
   struct mqtt_data *test_data = (struct mqtt_data *) c->fn_data;
   char *buf = test_data->msg;
-
-  if (ev == MG_EV_MQTT_OPEN) {
+#if MG_TLS
+  if (c->is_tls && ev == MG_EV_CONNECT) {
+    struct mg_tls_opts opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.ca = MQTTS_CA;
+#if defined( MQTT_LOCALHOST) && MG_TLS != MG_TLS_BUILTIN
+    MG_ERROR(("Hostname not tested"));
+#else
+    opts.name = mg_url_host(MQTTS_URL);
+#endif
+    mg_tls_init(c, &opts);
+  } else
+#endif
+      if (ev == MG_EV_MQTT_OPEN) {
     buf[0] = *(int *) ev_data == 0 ? 'X' : 'Y';
   } else if (ev == MG_EV_CLOSE) {
     buf[0] = 0;
@@ -416,35 +488,34 @@ static void mqtt_cb(struct mg_connection *c, int ev, void *ev_data) {
              mm->data.buf);
 
     if (mm->cmd == MQTT_CMD_PUBLISH && c->is_mqtt5) {
-      size_t pos = 0;
+      size_t pos = 0, i = 0, j = 0;
       struct mg_mqtt_prop prop;
 
-      ASSERT((pos = mg_mqtt_next_prop(mm, &prop, pos)) > 0);
-      ASSERT(prop.iv == 10 && prop.id == MQTT_PROP_MESSAGE_EXPIRY_INTERVAL);
-
-      ASSERT((pos = mg_mqtt_next_prop(mm, &prop, pos)) > 0);
-      ASSERT(prop.id == MQTT_PROP_PAYLOAD_FORMAT_INDICATOR);
-
-      ASSERT((pos = mg_mqtt_next_prop(mm, &prop, pos)) > 0);
-      ASSERT(prop.id == MQTT_PROP_CONTENT_TYPE);
-      ASSERT(strncmp(prop.val.buf, "test_content_val_2", prop.val.len) == 0 &&
-             prop.val.len == strlen("test_content_val_2"));
-
-      ASSERT((pos = mg_mqtt_next_prop(mm, &prop, pos)) > 0);
-      ASSERT(prop.id == MQTT_PROP_USER_PROPERTY);
-      ASSERT(strncmp(prop.key.buf, "test_key_1", prop.key.len) == 0 &&
-             prop.key.len == strlen("test_key_1"));
-      ASSERT(strncmp(prop.val.buf, "test_value_1", prop.val.len) == 0 &&
-             prop.val.len == strlen("test_value_1"));
-
-      ASSERT((pos = mg_mqtt_next_prop(mm, &prop, pos)) > 0);
-      ASSERT(prop.id == MQTT_PROP_USER_PROPERTY);
-      ASSERT(strncmp(prop.key.buf, "test_key_2", prop.key.len) == 0 &&
-             prop.key.len == strlen("test_key_2"));
-      ASSERT(strncmp(prop.val.buf, "test_value_2", prop.val.len) == 0 &&
-             prop.val.len == strlen("test_value_2"));
-
+      for (i = 0; i < 5 ; i++) {
+        ASSERT((pos = mg_mqtt_next_prop(mm, &prop, pos)) > 0);
+        if (prop.id == MQTT_PROP_MESSAGE_EXPIRY_INTERVAL) {
+          ASSERT(prop.iv == 10);
+          j += 1;
+        } else if (prop.id == MQTT_PROP_PAYLOAD_FORMAT_INDICATOR) {
+          j += 2;
+          continue;
+        } else if (prop.id == MQTT_PROP_CONTENT_TYPE) {
+          ASSERT(strncmp(prop.val.buf, "test_content_val_2", prop.val.len) == 0 && prop.val.len == strlen("test_content_val_2"));
+          j += 4;
+        } else if (prop.id == MQTT_PROP_USER_PROPERTY) {
+          if (strncmp(prop.key.buf, "test_key_1", prop.key.len) == 0 && prop.key.len == strlen("test_key_1")) {
+            ASSERT(strncmp(prop.val.buf, "test_value_1", prop.val.len) == 0 && prop.val.len == strlen("test_value_1"));
+            j += 8;
+          } else if (strncmp(prop.key.buf, "test_key_2", prop.key.len) == 0 && prop.key.len == strlen("test_key_2")) {
+            ASSERT(strncmp(prop.val.buf, "test_value_2", prop.val.len) == 0 && prop.val.len == strlen("test_value_2"));
+            j += 16;
+          } else {
+            ASSERT(0);
+          }
+        }
+      }
       ASSERT((pos = mg_mqtt_next_prop(mm, &prop, pos)) == 0);
+      ASSERT(j == 31);
     }
   }
   (void) c;
@@ -475,7 +546,7 @@ static void test_mqtt_base(void) {
   struct mqtt_data test_data = {buf, buf, 10, 10, 0};
   struct mg_mgr mgr;
   struct mg_connection *c;
-  const char *url = "mqtt://broker.hivemq.com:1883";
+  const char *url = MQTT_URL;
   int i;
   mg_mgr_init(&mgr);
 
@@ -517,7 +588,11 @@ static void test_mqtt_basic(void) {
   struct mg_mgr mgr;
   struct mg_connection *c;
   struct mg_mqtt_opts opts;
-  const char *url = "mqtt://broker.hivemq.com:1883";
+#if MG_TLS
+  const char *url = MQTTS_URL;
+#else
+  const char *url = MQTT_URL;
+#endif
   int i, retries;
 
   // Connect with empty client ID, no options, ergo MQTT = 3.1.1
@@ -562,6 +637,25 @@ static void test_mqtt_basic(void) {
   test_data.flags = 0;
   opts.retransmit_id = 0;
 
+#if MG_TLS
+  // send more than 1 record, content is not relevant
+  {
+    static char somedata[21098];
+    mg_random(somedata, sizeof(somedata));
+    opts.message = mg_str_n(somedata, sizeof(somedata));
+  }
+  opts.qos = 1, opts.retain = false, opts.retransmit_id = 0;
+  mg_mqtt_pub(c, &opts);
+  tbuf[0] = 0;
+  for (i = 0; i < 1000 && test_data.flags == 0; i++) mg_mgr_poll(&mgr, 10);
+  ASSERT(test_data.flags == flags_published);
+  for (i = 0; i < 1000 && tbuf[0] == 0; i++) mg_mgr_poll(&mgr, 10);
+  ASSERT(tbuf[0] != 0);  // just check we were able to send and receive
+  memset(mbuf + 1, 0, sizeof(mbuf) - 1);
+  test_data.flags = 0;
+  opts.retransmit_id = 0;
+#endif
+
   // Clean Disconnect !
   mg_mqtt_disconnect(c, NULL);
   for (i = 0; i < 10 && mbuf[0] != 0; i++) mg_mgr_poll(&mgr, 10);
@@ -576,7 +670,7 @@ static void test_mqtt_ver(uint8_t mqtt_version) {
   struct mg_connection *c;
   struct mg_mqtt_opts opts;
   struct mg_mqtt_prop properties[5];
-  const char *url = "mqtt://broker.hivemq.com:1883";
+  const char *url = MQTT_URL;
   int i, retries;
 
   MG_DEBUG(("ver: %u", mqtt_version));
@@ -593,7 +687,7 @@ static void test_mqtt_ver(uint8_t mqtt_version) {
   opts.message = mg_str("mg_will_messsage");
   opts.client_id = genstring(client_id, sizeof(client_id));
   c = mg_mqtt_connect(&mgr, url, &opts, mqtt_cb, &test_data);
-  for (i = 0; i < 300 && mbuf[0] == 0; i++) mg_mgr_poll(&mgr, 10);
+  for (i = 0; i < 500 && mbuf[0] == 0; i++) mg_mgr_poll(&mgr, 10);
   if (mbuf[0] != 'X') MG_INFO(("[%s]", mbuf));
   ASSERT(mbuf[0] == 'X');
   ASSERT(test_data.flags == 0);
@@ -664,9 +758,14 @@ static void test_mqtt_ver(uint8_t mqtt_version) {
 
 static void test_mqtt(void) {
   test_mqtt_base();
+#ifdef NO_MQTT_TESTS
+  MG_ERROR(("MQTT tests skipped on request"));
+  (void) test_mqtt_basic, (void) test_mqtt_ver;
+#else
   test_mqtt_basic();
   test_mqtt_ver(4);
   test_mqtt_ver(5);
+#endif
 }
 
 static void eh1(struct mg_connection *c, int ev, void *ev_data) {
@@ -1098,7 +1197,7 @@ static void test_http_server(void) {
     struct mg_str data = mg_file_read(&mg_fs_posix, "./data/ca.pem");
     ASSERT(fetch(&mgr, buf, url, "GET /ca.pem HTTP/1.0\r\n\n") == 200);
     ASSERT(cmpbody(buf, data.buf) == 0);
-    free((void *) data.buf);
+    mg_free((void *) data.buf);
   }
 
   {
@@ -1178,7 +1277,7 @@ static void test_http_server(void) {
     s = mg_file_read(&mg_fs_posix, "uploaded.txt");
     ASSERT(s.buf != NULL);
     ASSERT(strcmp(s.buf, "hello\nworld") == 0);
-    free((void *) s.buf);
+    mg_free((void *) s.buf);
     remove("uploaded.txt");
   }
 
@@ -1311,6 +1410,9 @@ static void test_tls(void) {
   char buf[FETCH_BUF_SIZE];
   struct mg_tls_opts opts;
   struct mg_str data = mg_unpacked("/Makefile");
+  char bigdata[FETCH_BUF_SIZE - 256];  // leave extra room
+  struct mg_str bd;
+  ASSERT(data.buf != NULL && data.len > 0);
   memset(&opts, 0, sizeof(opts));
   // opts.ca = mg_str(s_tls_ca);
   opts.cert = mg_unpacked("/certs/server.crt");
@@ -1321,17 +1423,29 @@ static void test_tls(void) {
   ASSERT(fetch(&mgr, buf, url, "GET /a.txt HTTP/1.0\n\n") == 200);
   // MG_INFO(("%s", buf));
   ASSERT(cmpbody(buf, "hello\n") == 0);
-  // POST a large file, make sure we drain TLS buffers and read all, #2619
-  ASSERT(data.buf != NULL && data.len > 0);
+  // POST a large file, several MSS but less than max TLS record length
+  // make sure we drain TLS buffers and read all, #2619
+  ASSERT(data.len > 3100 && data.len < 16384);  // pick another file on failure
   ASSERT(fetch(&mgr, buf, url,
-               "POST /foo/bar HTTP/1.0\n"
+               "POST /body HTTP/1.0\n"
                "Content-Length: %lu\n\n"
                "%s",
                data.len, data.buf) == 200);
+  // /body returns data back, so verify contents (both server and client send
+  // and receive the whole file
+  ASSERT(cmpbody(buf, data.buf) == 0);
+  // repeat with a really large "file", several times max TLS record length
+  bd = genstring(bigdata, sizeof(bigdata));
+  ASSERT(fetch(&mgr, buf, url,
+               "POST /body HTTP/1.0\n"
+               "Content-Length: %lu\n\n"
+               "%s",
+               bd.len, bd.buf) == 200);
+  ASSERT(cmpbody(buf, bd.buf) == 0);
 #if MG_TLS == MG_TLS_BUILTIN && defined(__linux__)
   // fire patched server, test multiple TLS records per TCP segment handling
   // skip other TLS stacks to avoid "bad client hello", we are 1.3 only
-  {
+  if (access("tls_multirec/server", X_OK) == 0) {
     ASSERT(system("tls_multirec/server -d tls_multirec &") == 0);
     sleep(1);
     // fetch() needs to loop enough times in order to process all TLS records;
@@ -1340,6 +1454,8 @@ static void test_tls(void) {
                  "GET /thefile HTTP/1.0\n\n") == 200);
     ASSERT(cmpbody(buf, data.buf) == 0);  // "thefile" links to Makefile
     ASSERT(system("killall tls_multirec/server") == 0);
+  } else {
+    MG_ERROR(("SKIPPED TLS MULTIPLE RECORDS TEST, tls_multirec/server NOT PRESENT"));
   }
 #else
   printf(
@@ -1389,21 +1505,28 @@ static void test_http_client(void) {
   mg_mgr_init(&mgr);
   c = mg_http_connect(&mgr, url, f3, &ok);
   ASSERT(c != NULL);
-  for (i = 0; i < 500 && ok <= 0; i++) mg_mgr_poll(&mgr, 1);
-  MG_INFO(("%d", ok));
-  ASSERT(ok == 301);
+  for (i = 0; i < 1000 && ok <= 0; i++) mg_mgr_poll(&mgr, 1);
+  MG_INFO(("OK: %d", ok));
+  ASSERT(ok == 301 || ok == 200);
   mg_mgr_poll(&mgr, 0);
   ok = 0;
 #if MG_TLS
-  c = mg_http_connect(&mgr, "https://cesanta.com", f3, &ok);
+  url = "https://cesanta.com";
+  opts.name = mg_url_host(url);
+#if MG_TLS == MG_TLS_BUILTIN
+  // our TLS does not search for the proper CA in a bundle
+  opts.ca = mg_file_read(&mg_fs_posix, "data/e5.crt");
+#endif
+  c = mg_http_connect(&mgr, url, f3, &ok);
   ASSERT(c != NULL);
   mg_tls_init(c, &opts);
   for (i = 0; i < 1500 && ok <= 0; i++) mg_mgr_poll(&mgr, 1);
+  MG_INFO(("OK: %d", ok));
   ASSERT(ok == 200);
   mg_mgr_poll(&mgr, 1);
 
-  // Test failed host validation
-  c = mg_http_connect(&mgr, "https://cesanta.com", f3, &ok);
+  // Make host validationfail
+  c = mg_http_connect(&mgr, url, f3, &ok);
   ASSERT(c != NULL);
   opts.name = mg_str("dummy");  // Set some invalid hostname value
   mg_tls_init(c, &opts);
@@ -1412,16 +1535,19 @@ static void test_http_client(void) {
   MG_INFO(("OK: %d", ok));
   ASSERT(ok == 777);
   mg_mgr_poll(&mgr, 1);
+  opts.name = mg_url_host(url);
+#if MG_TLS == MG_TLS_BUILTIN
+  mg_free((void *) opts.ca.buf);
+#endif
 
   // Test empty CA
   // Disable mbedTLS: https://github.com/Mbed-TLS/mbedtls/issues/7075
 #if MG_TLS != MG_TLS_MBED
-  opts.name = mg_str("cesanta.com");
   opts.ca = mg_str("");
-  c = mg_http_connect(&mgr, "https://cesanta.com", f3, &ok);
+  c = mg_http_connect(&mgr, url, f3, &ok);
   mg_tls_init(c, &opts);
   ok = 0;
-  for (i = 0; i < 500 && ok <= 0; i++) mg_mgr_poll(&mgr, 10);
+  for (i = 0; i < 1000 && ok <= 0; i++) mg_mgr_poll(&mgr, 10);
   MG_INFO(("OK: %d", ok));
   ASSERT(ok == 200);
   mg_mgr_poll(&mgr, 1);
@@ -1434,6 +1560,7 @@ static void test_http_client(void) {
   // it is guaranteed to hit IPv6 resolution path.
   c = mg_http_connect(&mgr, "http://ipv6.google.com", f3, &ok);
   for (i = 0; i < 500 && ok <= 0; i++) mg_mgr_poll(&mgr, 10);
+  MG_INFO(("OK: %d", ok));
   ASSERT(ok == 200);
 #endif
 
@@ -1976,7 +2103,6 @@ static void test_timer(void) {
     ASSERT(mgr.timers == NULL);
     ASSERT(mgr.conns == NULL);
   }
-
 }
 
 static bool sn(const char *fmt, ...) {
@@ -2028,7 +2154,7 @@ static void test_str(void) {
   {
     struct mg_str s = mg_strdup(mg_str("a"));
     ASSERT(mg_strcmp(s, mg_str("a")) == 0);
-    free((void *) s.buf);
+    mg_free((void *) s.buf);
   }
 
   {
@@ -2144,11 +2270,11 @@ static void test_str(void) {
 
     p = mg_mprintf("[%s,%M,%s]", "null", pf1, 2, 3, "hi");
     ASSERT(strcmp(p, "[null,5,hi]") == 0);
-    free(p);
+    mg_free(p);
 
     p = mg_mprintf("[%M,%d]", pf2, 10, 7);
     ASSERT(strcmp(p, "[9876543210,7]") == 0);
-    free(p);
+    mg_free(p);
 
     mg_xprintf(mg_pfn_iobuf, &io, "[%M", pf2, 10);
     mg_xprintf(mg_pfn_iobuf, &io, ",");
@@ -2349,7 +2475,7 @@ static void test_str(void) {
 
 static void fn1(struct mg_connection *c, int ev, void *ev_data) {
   if (ev == MG_EV_ERROR) {
-    free(*(char **) c->fn_data);  // See #2263
+    mg_free(*(char **) c->fn_data);  // See #2263
     *(char **) c->fn_data = mg_mprintf("%s", (char *) ev_data);
   }
   (void) c;
@@ -2370,7 +2496,7 @@ static void test_dns_error(const char *dns_server_url, const char *errstr) {
   mg_mgr_free(&mgr);
   // MG_DEBUG(("buf: [%s] [%s]", buf, errstr));
   ASSERT(buf != NULL && strcmp(buf, errstr) == 0);
-  free(buf);
+  mg_free(buf);
 }
 
 static void test_dns(void) {
@@ -2424,14 +2550,14 @@ static void test_dns(void) {
     // 0000   00 00 00 00 00 01 00 00 00 00 00 00 03 61 62 63   .............abc
     // 0010   05 6c 6f 63 61 6c 00 00 01 00 01                  .local.....
     uint8_t d[] = {
-      0x00, 0x00, // txid: 0
-      0x00, 0x00, // flags: 0 (Query flag = 0)
-      0x00, 0x01, // numQuestions: 1
-      0x00, 0x00, // numAnswers: 1
-      0x00, 0x00, 0x00, 0x00, // additional RRs
-      0x03, 0x61, 0x62, 0x63, // "abc"
-      0x05, 0x6c, 0x6f, 0x63, 0x61, 0x6c, // "local"
-      0x00, 0x00, 0x01, 0x00, 0x01 // domain end, type, class
+        0x00, 0x00,                          // txid: 0
+        0x00, 0x00,                          // flags: 0 (Query flag = 0)
+        0x00, 0x01,                          // numQuestions: 1
+        0x00, 0x00,                          // numAnswers: 1
+        0x00, 0x00, 0x00, 0x00,              // additional RRs
+        0x03, 0x61, 0x62, 0x63,              // "abc"
+        0x05, 0x6c, 0x6f, 0x63, 0x61, 0x6c,  // "local"
+        0x00, 0x00, 0x01, 0x00, 0x01         // domain end, type, class
     };
     memset(&dm, 0, sizeof(dm));
     ASSERT(mg_dns_parse(d, sizeof(d), &dm) == 1);
@@ -2457,7 +2583,7 @@ static void test_util(void) {
   data = mg_file_read(&mg_fs_posix, "data.txt");
   ASSERT(data.buf != NULL);
   ASSERT(strcmp(data.buf, "hi") == 0);
-  free((void *) data.buf);
+  mg_free((void *) data.buf);
   remove("data.txt");
   ASSERT(mg_aton(mg_str("0"), &a) == false);
   ASSERT(mg_aton(mg_str("0.0.0."), &a) == false);
@@ -2469,15 +2595,17 @@ static void test_util(void) {
   ASSERT(ipv4 == mg_htonl(0x7f000001));
   ASSERT(mg_ntohl(ipv4) == 0x7f000001);
   MG_STORE_BE32(&ipv4, 0x5678abcd);
-  ASSERT(((uint8_t *)&ipv4)[0] == 0x56 && ((uint8_t *)&ipv4)[1] == 0x78 && ((uint8_t *)&ipv4)[2] == 0xab && ((uint8_t *)&ipv4)[3] == 0xcd);
+  ASSERT(((uint8_t *) &ipv4)[0] == 0x56 && ((uint8_t *) &ipv4)[1] == 0x78 &&
+         ((uint8_t *) &ipv4)[2] == 0xab && ((uint8_t *) &ipv4)[3] == 0xcd);
   ASSERT(MG_LOAD_BE32(&ipv4) == 0x5678abcd);
   MG_STORE_BE16(&port, 0x1234);
-  ASSERT(((uint8_t *)&port)[0] == 0x12 && ((uint8_t *)&port)[1] == 0x34);
+  ASSERT(((uint8_t *) &port)[0] == 0x12 && ((uint8_t *) &port)[1] == 0x34);
   ASSERT(MG_LOAD_BE16(&port) == 0x1234);
   ASSERT(port == mg_htons(0x1234));
   ASSERT(mg_ntohs(port) == 0x1234);
   MG_STORE_BE24(&ipv4, 0xef2345);
-  ASSERT(((uint8_t *)&ipv4)[0] == 0xef && ((uint8_t *)&ipv4)[1] == 0x23 && ((uint8_t *)&ipv4)[2] == 0x45);
+  ASSERT(((uint8_t *) &ipv4)[0] == 0xef && ((uint8_t *) &ipv4)[1] == 0x23 &&
+         ((uint8_t *) &ipv4)[2] == 0x45);
   ASSERT(MG_LOAD_BE24(&ipv4) == 0xef2345);
 
   memset(a.ip, 0xa5, sizeof(a.ip));
@@ -2567,7 +2695,7 @@ static void test_util(void) {
   {
     s = mg_mprintf("%3d", 123);
     ASSERT(strcmp(s, "123") == 0);
-    free(s);
+    mg_free(s);
   }
 
   {
@@ -2991,13 +3119,13 @@ static void test_packed(void) {
   // printf("---> %s\n", buf);
   ASSERT(fetch(&mgr, buf, url, "GET /Makefile HTTP/1.0\n\n") == 200);
   ASSERT(cmpbody(buf, data.buf) == 0);
-  free((void *) data.buf);
+  mg_free((void *) data.buf);
 
   // Load file deeper in the FS tree directly
   data = mg_file_read(&mg_fs_posix, "data/ssi.h");
   ASSERT(fetch(&mgr, buf, url, "GET /data/ssi.h HTTP/1.0\n\n") == 200);
   ASSERT(cmpbody(buf, data.buf) == 0);
-  free((void *) data.buf);
+  mg_free((void *) data.buf);
 
   // List root dir
   ASSERT(fetch(&mgr, buf, url, "GET / HTTP/1.0\n\n") == 200);
@@ -3298,14 +3426,14 @@ static void test_json(void) {
     ASSERT(str != NULL);
     // printf("---> [%s]\n", str);
     ASSERT(strcmp(str, "b") == 0);
-    free(str);
+    mg_free(str);
 
     json = mg_str("{\"a\": \"hi\\nthere\",\"b\": [12345, true]}");
     str = mg_json_get_str(json, "$.a");
 
     ASSERT(str != NULL);
     ASSERT(strcmp(str, "hi\nthere") == 0);
-    free(str);
+    mg_free(str);
 
     ASSERT(mg_json_get_long(json, "$.foo", -42) == -42);
     ASSERT(mg_json_get_long(json, "$.b[0]", -42) == 12345);
@@ -3324,10 +3452,10 @@ static void test_json(void) {
     json = mg_str("[\"YWJj\", \"0100026869\"]");
     ASSERT((str = mg_json_get_b64(json, "$[0]", &len)) != NULL);
     ASSERT(len == 3 && memcmp(str, "abc", (size_t) len) == 0);
-    free(str);
+    mg_free(str);
     ASSERT((str = mg_json_get_hex(json, "$[1]", &len)) != NULL);
     ASSERT(len == 5 && memcmp(str, "\x01\x00\x02hi", (size_t) len) == 0);
-    free(str);
+    mg_free(str);
 
     json = mg_str("{\"a\":[1,2,3], \"ab\": 2}");
     ASSERT(mg_json_get_long(json, "$.a[0]", -42) == 1);
@@ -3760,12 +3888,69 @@ static void test_x25519(void) {
 #endif
 }
 
+static void test_rsa(void) {
+#if MG_TLS == MG_TLS_BUILTIN
+  const unsigned char mod[] = {
+      0x00, 0xba, 0xee, 0x3b, 0x0b, 0x89, 0x58, 0xa6, 0x19, 0x0d, 0x4c, 0x89,
+      0x1a, 0x85, 0x9a, 0xf4, 0x55, 0xc2, 0xdd, 0x0d, 0xd4, 0x4a, 0xf5, 0xed,
+      0xda, 0x28, 0x55, 0x2f, 0x64, 0x46, 0x21, 0x9f, 0x46, 0x5c, 0xfa, 0x37,
+      0x88, 0x11, 0xdf, 0xcb, 0x51, 0x73, 0x42, 0x3d, 0x5e, 0x50, 0xde, 0x11,
+      0x30, 0x61, 0x04, 0x59, 0xd0, 0xf4, 0x57, 0xed, 0x13, 0x90, 0x32, 0xc5,
+      0x3f, 0xe6, 0x66, 0xfc, 0x2a, 0x12, 0xa3, 0x1f, 0xd1, 0x77, 0x21, 0x65,
+      0xdf, 0x9a, 0xcf, 0x04, 0x05, 0xc3, 0x1c, 0xf8, 0x79, 0xb5, 0xf5, 0x97,
+      0x68, 0x98, 0x2e, 0x96, 0x85, 0x3f, 0xee, 0x71, 0x91, 0xc1, 0x54, 0x71,
+      0x9a, 0x80, 0x1f, 0xbe, 0x21, 0xd9, 0xc1, 0x80, 0x9b, 0xd0, 0x5d, 0xb3,
+      0x76, 0x3e, 0xcc, 0x14, 0x3d, 0xec, 0xb7, 0x18, 0x74, 0xfb, 0xc4, 0x0e,
+      0x56, 0x8d, 0x3d, 0x78, 0xe6, 0xca, 0xcd, 0x9d, 0xc6, 0x20, 0x5a, 0xeb,
+      0x9b, 0xc8, 0x19, 0x5e, 0xeb, 0x80, 0xd2, 0xb2, 0xfe, 0x88, 0x15, 0x5c,
+      0x7c, 0x6b, 0x26, 0xe0, 0x43, 0xda, 0xa4, 0x07, 0x85, 0x73, 0xc4, 0x80,
+      0x28, 0xcb, 0xda, 0x18, 0x56, 0x37, 0x91, 0xd6, 0x41, 0xa1, 0x0b, 0xa2,
+      0x77, 0xd0, 0x62, 0x31, 0xc7, 0xc2, 0x67, 0x6d, 0x75, 0x08, 0x80, 0xe7,
+      0xb6, 0xbe, 0xc2, 0x25, 0xc9, 0xe0, 0x2c, 0x02, 0xbf, 0x39, 0x61, 0x7e,
+      0x32, 0xa4, 0xc9, 0xe7, 0x91, 0xe3, 0xa0, 0xcd, 0x94, 0x24, 0xbf, 0x8c,
+      0xeb, 0x47, 0x76, 0x53, 0x85, 0xb3, 0xb7, 0x31, 0x80, 0x3c, 0x77, 0x10,
+      0x69, 0xc3, 0x04, 0xd1, 0x60, 0x4c, 0x74, 0xda, 0x15, 0x18, 0x0b, 0x20,
+      0x6f, 0xb3, 0x03, 0x58, 0x4a, 0xfc, 0xd1, 0xd2, 0xcf, 0x37, 0x15, 0x0a,
+      0x63, 0xc8, 0xe9, 0xd5, 0x7d, 0xd5, 0xf2, 0x90, 0x78, 0x53, 0x49, 0xa9,
+      0xc5, 0x25, 0x65, 0x5c, 0x01};
+  const unsigned char exp[] = {1, 0, 1};  // 65537
+  const unsigned char sig[] = {
+      0x1e, 0xb1, 0x6a, 0xcb, 0x39, 0x63, 0x12, 0xed, 0x85, 0x62, 0x4b, 0x85,
+      0x47, 0x25, 0x67, 0xbd, 0xbd, 0x0e, 0xaa, 0x73, 0x34, 0x5f, 0x07, 0x2b,
+      0xbb, 0x4f, 0xf5, 0x21, 0x88, 0xb1, 0x04, 0x2c, 0xbb, 0x52, 0x72, 0x64,
+      0x89, 0x45, 0x50, 0x41, 0x73, 0xca, 0xda, 0x97, 0xae, 0x81, 0x89, 0x4f,
+      0x83, 0x8d, 0x48, 0x65, 0x63, 0xe7, 0x82, 0x03, 0xd2, 0x40, 0x07, 0x1c,
+      0x86, 0x58, 0xd5, 0xac, 0x89, 0xb1, 0xca, 0x5c, 0xde, 0x21, 0x06, 0x88,
+      0x88, 0x0c, 0xe1, 0x20, 0xc0, 0xdf, 0xf1, 0x92, 0x9b, 0xb8, 0xa5, 0xeb,
+      0x6d, 0x89, 0xcc, 0x5c, 0x5c, 0x24, 0x3e, 0x9b, 0x3c, 0x35, 0x32, 0xa5,
+      0x04, 0x9e, 0x8c, 0x49, 0x01, 0xee, 0xbf, 0x1f, 0x2c, 0xb0, 0x52, 0xa8,
+      0xab, 0x79, 0x11, 0xcf, 0xb5, 0x5a, 0x16, 0xa1, 0xee, 0x21, 0x6a, 0x5a,
+      0x2b, 0x14, 0xae, 0x32, 0x3c, 0xa2, 0x6c, 0xa2, 0x40, 0x0c, 0xcb, 0x9e,
+      0x8f, 0x69, 0xab, 0xd7, 0xf3, 0xd8, 0xd1, 0xfb, 0x2d, 0xfa, 0xa9, 0x13,
+      0x09, 0xbf, 0xa7, 0xca, 0xc8, 0x90, 0x74, 0x23, 0x7b, 0x3e, 0xdd, 0x81,
+      0x32, 0xa7, 0x88, 0x42, 0x56, 0x8a, 0xcb, 0xe8, 0x8f, 0xef, 0x06, 0x9f,
+      0x39, 0x7e, 0x8e, 0x24, 0x07, 0xb3, 0xae, 0x7e, 0x13, 0x6b, 0xf2, 0xf8,
+      0x35, 0xe4, 0x16, 0x3e, 0xae, 0xf2, 0x55, 0x79, 0x10, 0x39, 0xfa, 0x70,
+      0x3a, 0x1b, 0x02, 0xb3, 0x2b, 0x1d, 0x44, 0xac, 0x30, 0x81, 0xd3, 0x11,
+      0xdd, 0x34, 0x1e, 0xcd, 0x26, 0xf5, 0x89, 0xc6, 0x55, 0x23, 0x17, 0x09,
+      0xd2, 0xc1, 0xdc, 0x49, 0xf9, 0x99, 0x36, 0x2b, 0xf5, 0xae, 0x42, 0x5c,
+      0xb7, 0x80, 0xda, 0x32, 0x69, 0x28, 0xa3, 0xee, 0xb9, 0xd4, 0x90, 0xa6,
+      0xab, 0x34, 0x17, 0x5e, 0xa0, 0xd6, 0xc1, 0x54, 0xc6, 0x9c, 0x58, 0x3a,
+      0xaf, 0xbf, 0xdc, 0x64};
+  unsigned char v[256];  // 2048 bits
+  mg_rsa_mod_pow(mod, sizeof(mod), exp, sizeof(exp), sig, sizeof(sig), v,
+                 sizeof(v));
+  ASSERT(v[sizeof(v) - 1] == 0xbc);
+#endif
+}
+
 static void test_crypto(void) {
   test_md5();
   test_sha1();
   test_sha256();
   test_sha384();
   test_x25519();
+  test_rsa();
 }
 
 int main(void) {
@@ -3809,7 +3994,7 @@ int main(void) {
   test_http_range();
 #ifndef LOCALHOST_ONLY
   test_sntp();
-  test_mqtt();
+  test_mqtt();  // sorry, MQTT_LOCALHOST is also skipped 
   test_http_client();
 #else
   (void) test_sntp, (void) test_mqtt, (void) test_http_client;

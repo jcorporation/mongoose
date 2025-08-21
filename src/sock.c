@@ -160,8 +160,10 @@ static void mg_set_non_blocking_mode(MG_SOCKET_TYPE fd) {
   if (setsockopt(fd, 0, FREERTOS_SO_SNDTIMEO, &off, sizeof(off)) != 0) (void) 0;
 #elif MG_ENABLE_LWIP
   lwip_fcntl(fd, F_SETFL, O_NONBLOCK);
-#elif MG_ARCH == MG_ARCH_AZURERTOS
-  fcntl(fd, F_SETFL, O_NONBLOCK);
+#elif MG_ARCH == MG_ARCH_THREADX
+  // NetxDuo fails to send large blocks of data to the non-blocking sockets
+  (void) fd;
+  //fcntl(fd, F_SETFL, O_NONBLOCK);
 #elif MG_ARCH == MG_ARCH_TIRTOS
   int val = 0;
   setsockopt(fd, SOL_SOCKET, SO_BLOCKING, &val, sizeof(val));
@@ -183,15 +185,19 @@ void mg_multicast_add(struct mg_connection *c, char *ip) {
 #elif MG_ENABLE_FREERTOS_TCP
   // TODO(): prvAllowIPPacketIPv4()
 #else
-  // lwIP, Unix, Windows, Zephyr(, AzureRTOS ?)
+  // lwIP, Unix, Windows, Zephyr 4+(, AzureRTOS ?)
 #if MG_ENABLE_LWIP && !LWIP_IGMP
   MG_ERROR(("LWIP_IGMP not defined, no multicast support"));
+#else
+#if defined(__ZEPHYR__) && ZEPHYR_VERSION_CODE < 0x40000
+  MG_ERROR(("struct ip_mreq not defined"));
 #else
   struct ip_mreq mreq;
   mreq.imr_multiaddr.s_addr = inet_addr(ip);
   mreq.imr_interface.s_addr = mg_htonl(INADDR_ANY);
   setsockopt(FD(c), IPPROTO_IP, IP_ADD_MEMBERSHIP, (char *) &mreq, sizeof(mreq));
-#endif
+#endif // !Zephyr
+#endif // !lwIP
 #endif
 }
 
@@ -361,13 +367,14 @@ static void connect_conn(struct mg_connection *c) {
     mg_call(c, MG_EV_CONNECT, NULL);
     MG_EPOLL_MOD(c, 0);
     if (c->is_tls_hs) mg_tls_handshake(c);
+    if (!c->is_tls_hs) c->is_tls = 0; // user did not call mg_tls_init()
   } else {
     mg_error(c, "socket error");
   }
 }
 
 static void setsockopts(struct mg_connection *c) {
-#if MG_ENABLE_FREERTOS_TCP || MG_ARCH == MG_ARCH_AZURERTOS || \
+#if MG_ENABLE_FREERTOS_TCP || MG_ARCH == MG_ARCH_THREADX || \
     MG_ARCH == MG_ARCH_TIRTOS
   (void) c;
 #else
@@ -413,6 +420,7 @@ void mg_connect_resolved(struct mg_connection *c) {
     if (rc == 0) {                       // Success
       setlocaddr(FD(c), &c->loc);
       mg_call(c, MG_EV_CONNECT, NULL);  // Send MG_EV_CONNECT to the user
+      if (!c->is_tls_hs) c->is_tls = 0; // user did not call mg_tls_init()
     } else if (MG_SOCK_PENDING(rc)) {   // Need to wait for TCP handshake
       MG_DEBUG(("%lu %ld -> %M pend", c->id, c->fd, mg_print_ip_port, &c->rem));
       c->is_connecting = 1;
@@ -438,8 +446,8 @@ static void accept_conn(struct mg_mgr *mgr, struct mg_connection *lsn) {
   socklen_t sa_len = sizeof(usa);
   MG_SOCKET_TYPE fd = raccept(FD(lsn), &usa, &sa_len);
   if (fd == MG_INVALID_SOCKET) {
-#if MG_ARCH == MG_ARCH_AZURERTOS || defined(__ECOS)
-    // AzureRTOS, in non-block socket mode can mark listening socket readable
+#if MG_ARCH == MG_ARCH_THREADX || defined(__ECOS)
+    // NetxDuo, in non-block socket mode can mark listening socket readable
     // even it is not. See comment for 'select' func implementation in
     // nx_bsd.c That's not an error, just should try later
     if (errno != EAGAIN)
@@ -468,10 +476,12 @@ static void accept_conn(struct mg_mgr *mgr, struct mg_connection *lsn) {
     c->pfn_data = lsn->pfn_data;
     c->fn = lsn->fn;
     c->fn_data = lsn->fn_data;
+    c->is_tls = lsn->is_tls;
     MG_DEBUG(("%lu %ld accepted %M -> %M", c->id, c->fd, mg_print_ip_port,
               &c->rem, mg_print_ip_port, &c->loc));
     mg_call(c, MG_EV_OPEN, NULL);
     mg_call(c, MG_EV_ACCEPT, NULL);
+    if (!c->is_tls_hs) c->is_tls = 0; // user did not call mg_tls_init()
   }
 }
 
@@ -577,7 +587,7 @@ static void mg_iotest(struct mg_mgr *mgr, int ms) {
     }
   }
 #else
-  struct timeval tv = {ms / 1000, (ms % 1000) * 1000}, tv_zero = {0, 0}, *tvp;
+  struct timeval tv = {ms / 1000, (ms % 1000) * 1000}, tv_1ms = {0, 1000}, *tvp;
   struct mg_connection *c;
   fd_set rset, wset, eset;
   MG_SOCKET_TYPE maxfd = 0;
@@ -593,16 +603,16 @@ static void mg_iotest(struct mg_mgr *mgr, int ms) {
     FD_SET(FD(c), &eset);
     if (can_read(c)) FD_SET(FD(c), &rset);
     if (can_write(c)) FD_SET(FD(c), &wset);
-    if (c->rtls.len > 0 || mg_tls_pending(c) > 0) tvp = &tv_zero;
+    if (c->rtls.len > 0 || mg_tls_pending(c) > 0) tvp = &tv_1ms;
     if (FD(c) > maxfd) maxfd = FD(c);
-    if (c->is_closing) tvp = &tv_zero;
+    if (c->is_closing) tvp = &tv_1ms;
   }
 
-  if ((rc = select((int) maxfd + 1, &rset, &wset, &eset, tvp)) < 0) {
+  if ((rc = select((int) maxfd + 1, &rset, &wset, &eset, tvp)) <= 0) {
 #if MG_ARCH == MG_ARCH_WIN32
     if (maxfd == 0) Sleep(ms);  // On Windows, select fails if no sockets
 #else
-    MG_ERROR(("select: %d %d", rc, MG_SOCK_ERR(rc)));
+    if (rc < 0) MG_ERROR(("select: %d %d", rc, MG_SOCK_ERR(rc)));
 #endif
     FD_ZERO(&rset);
     FD_ZERO(&wset);
@@ -611,7 +621,12 @@ static void mg_iotest(struct mg_mgr *mgr, int ms) {
 
   for (c = mgr->conns; c != NULL; c = c->next) {
     if (FD(c) != MG_INVALID_SOCKET && FD_ISSET(FD(c), &eset)) {
+#if MG_ARCH == MG_ARCH_THREADX
+      // NetxDuo stack returns exceptions for listening connection after accept
+      if (c->is_listening == 0) mg_error(c, "socket error");
+#else
       mg_error(c, "socket error");
+#endif
     } else {
       c->is_readable = FD(c) != MG_INVALID_SOCKET && FD_ISSET(FD(c), &rset);
       c->is_writable = FD(c) != MG_INVALID_SOCKET && FD_ISSET(FD(c), &wset);
@@ -734,11 +749,10 @@ void mg_mgr_poll(struct mg_mgr *mgr, int ms) {
       if (c->is_readable) accept_conn(mgr, c);
     } else if (c->is_connecting) {
       if (c->is_readable || c->is_writable) connect_conn(c);
-      //} else if (c->is_tls_hs) {
-      //  if ((c->is_readable || c->is_writable)) mg_tls_handshake(c);
     } else {
       if (c->is_readable) read_conn(c);
       if (c->is_writable) write_conn(c);
+      if (c->is_tls && !c->is_tls_hs && c->send.len == 0) mg_tls_flush(c);
     }
 
     if (c->is_draining && c->send.len == 0) c->is_closing = 1;

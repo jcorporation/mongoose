@@ -156,10 +156,10 @@ static void handle_settings_set(struct mg_connection *c, struct mg_str body) {
   settings.log_level = (int) mg_json_get_long(body, "$.log_level", 0);
   settings.brightness = mg_json_get_long(body, "$.brightness", 0);
   if (s && strlen(s) < MAX_DEVICE_NAME) {
-    free(settings.device_name);
+    mg_free(settings.device_name);
     settings.device_name = s;
   } else {
-    free(s);
+    mg_free(s);
   }
   s_settings = settings;  // Save to the device flash
   mg_http_reply(c, 200, s_json_header,
@@ -205,7 +205,7 @@ static void handle_firmware_upload(struct mg_connection *c,
 // HTTP request handler function
 static void fn(struct mg_connection *c, int ev, void *ev_data) {
   if (ev == MG_EV_ACCEPT) {
-    if (c->fn_data != NULL) {  // TLS listener!
+    if (c->is_tls) {  // TLS listener!
       struct mg_tls_opts opts = {0};
       opts.cert = mg_unpacked("/certs/server_cert.pem");
       opts.key = mg_unpacked("/certs/server_key.pem");
@@ -253,7 +253,7 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
 void web_init(struct mg_mgr *mgr) {
   s_settings.device_name = strdup("My Device");
   mg_http_listen(mgr, HTTP_URL, fn, NULL);
-  mg_http_listen(mgr, HTTPS_URL, fn, (void *) 1);
+  mg_http_listen(mgr, HTTPS_URL, fn, NULL);
   mg_timer_add(mgr, 3600 * 1000, MG_TIMER_RUN_NOW | MG_TIMER_REPEAT,
                timer_sntp_fn, mgr);
 }

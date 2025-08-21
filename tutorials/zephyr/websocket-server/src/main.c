@@ -17,7 +17,7 @@ static struct mg_connection *s_sntp_conn = NULL;
 static void fn(struct mg_connection *c, int ev, void *ev_data) {
   if (ev == MG_EV_OPEN) {
     c->is_hexdumping = 1;
-  } else if (ev == MG_EV_ACCEPT && c->fn_data != NULL) {
+  } else if (ev == MG_EV_ACCEPT && c->is_tls) {
     struct mg_tls_opts opts = {.cert = (char *) s_ssl_cert, .key = (char *) s_ssl_key};
     mg_tls_init(c, &opts);
   } else if (ev == MG_EV_HTTP_MSG) {
@@ -68,7 +68,13 @@ static void timer_fn(void *arg) {
 // semaphore until this event handler releases it when the network is ready
 K_SEM_DEFINE(run, 0, 1);
 
-static void zeh(struct net_mgmt_event_callback *cb, uint32_t mgmt_event,
+static void zeh(struct net_mgmt_event_callback *cb,
+// https://docs.zephyrproject.org/latest/releases/migration-guide-4.2.html#networking
+#if ZEPHYR_VERSION_CODE < 0x40200
+                uint32_t mgmt_event,
+#else
+                uint64_t mgmt_event,
+#endif
                 struct net_if *iface) {
   if (mgmt_event == NET_EVENT_L4_CONNECTED) k_sem_give(&run);
 }
@@ -85,7 +91,7 @@ int main(int argc, char *argv[]) {
   mg_mgr_init(&mgr);
   mg_log_set(MG_LL_DEBUG);
   mg_http_listen(&mgr, s_ws_addr, fn, NULL);
-  mg_http_listen(&mgr, s_wss_addr, fn, &mgr);
+  mg_http_listen(&mgr, s_wss_addr, fn, NULL);
   mg_timer_add(&mgr, 5000, MG_TIMER_REPEAT | MG_TIMER_RUN_NOW, timer_fn, &mgr);
 
   // Start infinite event loop
