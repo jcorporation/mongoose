@@ -28,8 +28,8 @@ static void fn(struct mg_connection *c, int ev, void *ev_data) {
     // Connected to server. Extract host name from URL
     struct mg_str host = mg_url_host(s_url);
 
-    // If s_url is https://, tell client connection to use TLS
-    if (mg_url_is_ssl(s_url)) {
+    // If s_url is https://, init TLS client connection
+    if (c->is_tls) {
       struct mg_tls_opts opts = {.ca = s_ca, .name = host};
       mg_tls_init(c, &opts);
     }
@@ -92,7 +92,13 @@ static void timer_fn(void *arg) {
 // semaphore until this event handler releases it when the network is ready
 K_SEM_DEFINE(run, 0, 1);
 
-static void zeh(struct net_mgmt_event_callback *cb, uint32_t mgmt_event,
+static void zeh(struct net_mgmt_event_callback *cb,
+// https://docs.zephyrproject.org/latest/releases/migration-guide-4.2.html#networking
+#if ZEPHYR_VERSION_CODE < 0x40200
+                uint32_t mgmt_event,
+#else
+                uint64_t mgmt_event,
+#endif
                 struct net_if *iface) {
   if (mgmt_event == NET_EVENT_L4_CONNECTED) k_sem_give(&run);
 }

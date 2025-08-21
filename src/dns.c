@@ -18,7 +18,7 @@ static void mg_sendnsreq(struct mg_connection *, struct mg_str *, int,
 
 static void mg_dns_free(struct dns_data **head, struct dns_data *d) {
   LIST_DELETE(struct dns_data, head, d);
-  free(d);
+  mg_free(d);
 }
 
 void mg_resolve_cancel(struct mg_connection *c) {
@@ -232,21 +232,26 @@ static bool mg_dns_send(struct mg_connection *c, const struct mg_str *name,
   return mg_send(c, &pkt, sizeof(pkt.header) + n);
 }
 
+bool mg_dnsc_init(struct mg_mgr *mgr, struct mg_dns *dnsc);
+bool mg_dnsc_init(struct mg_mgr *mgr, struct mg_dns *dnsc) {
+  if (dnsc->url == NULL) {
+    mg_error(0, "DNS server URL is NULL. Call mg_mgr_init()");
+    return false;
+  }
+  if (dnsc->c == NULL) {
+    dnsc->c = mg_connect(mgr, dnsc->url, NULL, NULL);
+    if (dnsc->c == NULL) return false;
+    dnsc->c->pfn = dns_cb;
+  }
+  return true;
+}
+
 static void mg_sendnsreq(struct mg_connection *c, struct mg_str *name, int ms,
                          struct mg_dns *dnsc, bool ipv6) {
   struct dns_data *d = NULL;
-  if (dnsc->url == NULL) {
-    mg_error(c, "DNS server URL is NULL. Call mg_mgr_init()");
-  } else if (dnsc->c == NULL) {
-    dnsc->c = mg_connect(c->mgr, dnsc->url, NULL, NULL);
-    if (dnsc->c != NULL) {
-      dnsc->c->pfn = dns_cb;
-      // dnsc->c->is_hexdumping = 1;
-    }
-  }
-  if (dnsc->c == NULL) {
+  if (!mg_dnsc_init(c->mgr, dnsc)) {
     mg_error(c, "resolver");
-  } else if ((d = (struct dns_data *) calloc(1, sizeof(*d))) == NULL) {
+  } else if ((d = (struct dns_data *) mg_calloc(1, sizeof(*d))) == NULL) {
     mg_error(c, "resolve OOM");
   } else {
     struct dns_data *reqs = (struct dns_data *) c->mgr->active_dns_requests;
@@ -345,3 +350,4 @@ struct mg_connection *mg_mdns_listen(struct mg_mgr *mgr, char *name) {
   if (c != NULL) mg_multicast_add(c, (char *)"224.0.0.251");
   return c;
 }
+

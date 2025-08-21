@@ -1,5 +1,8 @@
 #include "log.h"
+#include "printf.h"
+#include "profile.h"
 #include "tls.h"
+#include "util.h"
 
 #if MG_TLS == MG_TLS_MBED
 
@@ -8,6 +11,13 @@
 #else
 #define MG_MBEDTLS_RNG_GET
 #endif
+
+static int mg_tls_err(struct mg_connection *c, int rc) {
+  char s[80];
+  mbedtls_strerror(rc, s, sizeof(s));
+  MG_ERROR(("%lu %s", ((struct mg_connection *) c)->id, s));
+  return rc;
+}
 
 static int mg_mbed_rng(void *ctx, unsigned char *buf, size_t len) {
   mg_random(buf, len);
@@ -49,7 +59,7 @@ void mg_tls_free(struct mg_connection *c) {
 #ifdef MBEDTLS_SSL_SESSION_TICKETS
     mbedtls_ssl_ticket_free(&tls->ticket);
 #endif
-    free(tls);
+    mg_free(tls);
     c->tls = NULL;
   }
 }
@@ -84,7 +94,7 @@ void mg_tls_handshake(struct mg_connection *c) {
     MG_VERBOSE(("%lu pending, %d%d %d (-%#x)", c->id, c->is_connecting,
                 c->is_tls_hs, rc, -rc));
   } else {
-    mg_error(c, "TLS handshake: -%#x", -rc);  // Error
+    mg_error(c, "TLS handshake: -%#x", -mg_tls_err(c, rc));  // Error
   }
 }
 
@@ -95,7 +105,7 @@ static void debug_cb(void *c, int lev, const char *s, int n, const char *s2) {
 }
 
 void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
-  struct mg_tls *tls = (struct mg_tls *) calloc(1, sizeof(*tls));
+  struct mg_tls *tls = (struct mg_tls *) mg_calloc(1, sizeof(*tls));
   int rc = 0;
   c->tls = tls;
   if (c->tls == NULL) {
@@ -122,7 +132,7 @@ void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
            &tls->conf,
            c->is_client ? MBEDTLS_SSL_IS_CLIENT : MBEDTLS_SSL_IS_SERVER,
            MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT)) != 0) {
-    mg_error(c, "tls defaults %#x", -rc);
+    mg_error(c, "tls defaults %#x", -mg_tls_err(c, rc));
     goto fail;
   }
   mbedtls_ssl_conf_rng(&tls->conf, mg_mbed_rng, c);
@@ -138,7 +148,7 @@ void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
       char *host = mg_mprintf("%.*s", opts->name.len, opts->name.buf);
       mbedtls_ssl_set_hostname(&tls->ssl, host);
       MG_DEBUG(("%lu hostname verification: %s", c->id, host));
-      free(host);
+      mg_free(host);
     }
     mbedtls_ssl_conf_authmode(&tls->conf, MBEDTLS_SSL_VERIFY_REQUIRED);
   }
@@ -146,7 +156,7 @@ void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
   if (!mg_load_key(opts->key, &tls->pk)) goto fail;
   if (tls->cert.version &&
       (rc = mbedtls_ssl_conf_own_cert(&tls->conf, &tls->cert, &tls->pk)) != 0) {
-    mg_error(c, "own cert %#x", -rc);
+    mg_error(c, "own cert %#x", -mg_tls_err(c, rc));
     goto fail;
   }
 
@@ -157,7 +167,7 @@ void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
 #endif
 
   if ((rc = mbedtls_ssl_setup(&tls->ssl, &tls->conf)) != 0) {
-    mg_error(c, "setup err %#x", -rc);
+    mg_error(c, "setup err %#x", -mg_tls_err(c, rc));
     goto fail;
   }
   c->is_tls = 1;
@@ -204,13 +214,21 @@ long mg_tls_send(struct mg_connection *c, const void *buf, size_t len) {
     tls->throttled_buf = (unsigned char *)buf; // MbedTLS code actually ignores
     tls->throttled_len = len; //  these, but let's play API rules
     return (long) len;  // already encripted that when throttled
-  }
+  } // if last chunk fails to be sent, it needs to be flushed
   if (n <= 0) return MG_IO_ERR;
   return n;
 }
 
+void mg_tls_flush(struct mg_connection *c) {
+  struct mg_tls *tls = (struct mg_tls *) c->tls;
+  if (c->is_tls_throttled) {
+    long n = mbedtls_ssl_write(&tls->ssl, tls->throttled_buf, tls->throttled_len);
+    c->is_tls_throttled = (n == MBEDTLS_ERR_SSL_WANT_READ || n == MBEDTLS_ERR_SSL_WANT_WRITE);
+  }
+}
+
 void mg_tls_ctx_init(struct mg_mgr *mgr) {
-  struct mg_tls_ctx *ctx = (struct mg_tls_ctx *) calloc(1, sizeof(*ctx));
+  struct mg_tls_ctx *ctx = (struct mg_tls_ctx *) mg_calloc(1, sizeof(*ctx));
   if (ctx == NULL) {
     MG_ERROR(("TLS context init OOM"));
   } else {
@@ -233,7 +251,7 @@ void mg_tls_ctx_free(struct mg_mgr *mgr) {
 #ifdef MBEDTLS_SSL_SESSION_TICKETS
     mbedtls_ssl_ticket_free(&ctx->tickets);
 #endif
-    free(ctx);
+    mg_free(ctx);
     mgr->tls_ctx = NULL;
   }
 }

@@ -1,7 +1,7 @@
+#include "net.h"
 #include "dns.h"
 #include "fmt.h"
 #include "log.h"
-#include "net.h"
 #include "printf.h"
 #include "profile.h"
 #include "timer.h"
@@ -126,7 +126,7 @@ bool mg_aton(struct mg_str str, struct mg_addr *addr) {
 
 struct mg_connection *mg_alloc_conn(struct mg_mgr *mgr) {
   struct mg_connection *c =
-      (struct mg_connection *) calloc(1, sizeof(*c) + mgr->extraconnsize);
+      (struct mg_connection *) mg_calloc(1, sizeof(*c) + mgr->extraconnsize);
   if (c != NULL) {
     c->mgr = mgr;
     c->send.align = c->recv.align = c->rtls.align = MG_IO_SIZE;
@@ -153,11 +153,12 @@ void mg_close_conn(struct mg_connection *c) {
   mg_iobuf_free(&c->send);
   mg_iobuf_free(&c->rtls);
   mg_bzero((unsigned char *) c, sizeof(*c));
-  free(c);
+  mg_free(c);
 }
 
-struct mg_connection *mg_connect(struct mg_mgr *mgr, const char *url,
-                                 mg_event_handler_t fn, void *fn_data) {
+struct mg_connection *mg_connect_svc(struct mg_mgr *mgr, const char *url,
+                                     mg_event_handler_t fn, void *fn_data,
+                                     mg_event_handler_t pfn, void *pfn_data) {
   struct mg_connection *c = NULL;
   if (url == NULL || url[0] == '\0') {
     MG_ERROR(("null url"));
@@ -170,11 +171,19 @@ struct mg_connection *mg_connect(struct mg_mgr *mgr, const char *url,
     c->fn = fn;
     c->is_client = true;
     c->fn_data = fn_data;
-    MG_DEBUG(("%lu %ld %s", c->id, c->fd, url));
+    c->is_tls = (mg_url_is_ssl(url) != 0);
+    c->pfn = pfn;
+    c->pfn_data = pfn_data;
     mg_call(c, MG_EV_OPEN, (void *) url);
+    MG_DEBUG(("%lu %ld %s", c->id, c->fd, url));
     mg_resolve(c, url);
   }
   return c;
+}
+
+struct mg_connection *mg_connect(struct mg_mgr *mgr, const char *url,
+                                 mg_event_handler_t fn, void *fn_data) {
+  return mg_connect_svc(mgr, url, fn, fn_data, NULL, NULL);
 }
 
 struct mg_connection *mg_listen(struct mg_mgr *mgr, const char *url,
@@ -183,9 +192,9 @@ struct mg_connection *mg_listen(struct mg_mgr *mgr, const char *url,
   if ((c = mg_alloc_conn(mgr)) == NULL) {
     MG_ERROR(("OOM %s", url));
   } else if (!mg_open_listener(c, url)) {
-    MG_ERROR(("Failed: %s, errno %d", url, errno));
+    MG_ERROR(("Failed: %s", url));
     MG_PROF_FREE(c);
-    free(c);
+    mg_free(c);
     c = NULL;
   } else {
     c->is_listening = 1;
@@ -193,8 +202,8 @@ struct mg_connection *mg_listen(struct mg_mgr *mgr, const char *url,
     LIST_ADD_HEAD(struct mg_connection, &mgr->conns, c);
     c->fn = fn;
     c->fn_data = fn_data;
+    c->is_tls = (mg_url_is_ssl(url) != 0);
     mg_call(c, MG_EV_OPEN, NULL);
-    if (mg_url_is_ssl(url)) c->is_tls = 1;  // Accepted connection must
     MG_DEBUG(("%lu %ld %s", c->id, c->fd, url));
   }
   return c;
@@ -216,9 +225,9 @@ struct mg_connection *mg_wrapfd(struct mg_mgr *mgr, int fd,
 
 struct mg_timer *mg_timer_add(struct mg_mgr *mgr, uint64_t milliseconds,
                               unsigned flags, void (*fn)(void *), void *arg) {
-  struct mg_timer *t = (struct mg_timer *) calloc(1, sizeof(*t));
+  struct mg_timer *t = (struct mg_timer *) mg_calloc(1, sizeof(*t));
   if (t != NULL) {
-    flags |= MG_TIMER_AUTODELETE;  // We have calloc-ed it, so autodelete
+    flags |= MG_TIMER_AUTODELETE;  // We have alloc'ed it, so autodelete
     mg_timer_init(&mgr->timers, t, milliseconds, flags, fn, arg);
   }
   return t;
@@ -235,7 +244,7 @@ long mg_io_recv(struct mg_connection *c, void *buf, size_t len) {
 void mg_mgr_free(struct mg_mgr *mgr) {
   struct mg_connection *c;
   struct mg_timer *tmp, *t = mgr->timers;
-  while (t != NULL) tmp = t->next, free(t), t = tmp;
+  while (t != NULL) tmp = t->next, mg_free(t), t = tmp;
   mgr->timers = NULL;  // Important. Next call to poll won't touch timers
   for (c = mgr->conns; c != NULL; c = c->next) c->is_closing = 1;
   mg_mgr_poll(mgr, 0);
@@ -266,7 +275,7 @@ void mg_mgr_init(struct mg_mgr *mgr) {
   // clang-format on
 #elif MG_ENABLE_FREERTOS_TCP
   mgr->ss = FreeRTOS_CreateSocketSet();
-#elif defined(__unix) || defined(__unix__) || defined(__APPLE__)
+#elif MG_ARCH == MG_ARCH_UNIX
   // Ignore SIGPIPE signal, so if client cancels the request, it
   // won't kill the whole process.
   signal(SIGPIPE, SIG_IGN);
@@ -278,4 +287,11 @@ void mg_mgr_init(struct mg_mgr *mgr) {
   mgr->dns4.url = "udp://8.8.8.8:53";
   mgr->dns6.url = "udp://[2001:4860:4860::8888]:53";
   mg_tls_ctx_init(mgr);
+  MG_DEBUG(("MG_IO_SIZE: %lu, TLS: %s", MG_IO_SIZE,
+            MG_TLS == MG_TLS_NONE      ? "none"
+            : MG_TLS == MG_TLS_MBED    ? "MbedTLS"
+            : MG_TLS == MG_TLS_OPENSSL ? "OpenSSL"
+            : MG_TLS == MG_TLS_BUILTIN ? "builtin"
+            : MG_TLS == MG_TLS_WOLFSSL ? "WolfSSL"
+                                       : "custom"));
 }

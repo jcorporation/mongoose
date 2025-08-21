@@ -1,3 +1,5 @@
+// https://llvm.org/docs/LibFuzzer.html
+
 #define MG_ENABLE_SOCKET 0
 #define MG_ENABLE_LOG 0
 #define MG_ENABLE_LINES 1
@@ -146,6 +148,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
     c->pfn(c, MG_EV_READ, NULL); // manually invoke protocol event handler
 
     free(pkt);
+    mg_mgr_free(&mgr);
   }
 
   return 0;

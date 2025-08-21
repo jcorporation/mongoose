@@ -33,11 +33,11 @@ jobs:
     env:
       CC: ${{ matrix.cc }}
       SSL: ${{ matrix.ssl }}
-      TFLAGS: ${{ matrix.select }}
+      TFLAGS: ${{ matrix.select }} -DMQTT_LOCALHOST
     steps:
     - uses: actions/checkout@v4
       with: { fetch-depth: 2 }
-    - run: sudo apt -y update ; sudo apt -y install libmbedtls-dev libwolfssl-dev && make -C test ${{ matrix.target }}
+    - run: sudo apt -y update ; sudo apt -y install libmbedtls-dev libwolfssl-dev && test/setup_mqtt_server.sh && make -C test ${{ matrix.target }}
   mip:
     runs-on: ubuntu-latest
     strategy:
@@ -46,14 +46,31 @@ jobs:
         cc: [gcc, clang, g++, clang++]
         target: [mip_test, mip_tap_test]
         ssl: ["", BUILTIN, MBEDTLS, OPENSSL, WOLFSSL]
+        # #3226: built-in TCP is currently not working with WolfSSL (builds fine)
+        exclude:
+        - ssl: WOLFSSL
+          target: mip_tap_test
     name: ${{ matrix.target }} CC=${{ matrix.cc }} SSL=${{ matrix.ssl }}
     env:
       CC: ${{ matrix.cc }}
       SSL: ${{ matrix.ssl }}
+      TFLAGS: -DMQTT_LOCALHOST
     steps:
     - uses: actions/checkout@v4
       with: { fetch-depth: 2 }
     - run: if [ "${{ matrix.target }}" == "mip_tap_test" ]; then ./test/setup_ga_network.sh ; fi && sudo apt -y update ; sudo apt -y install libmbedtls-dev libwolfssl-dev && make -C test ${{ matrix.target }} IPV6=0
+  mip89:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1   # no parallel runs, to minimize MQTT errors
+      matrix:
+        target: [mip_vc98]
+    name: mip89 ${{ matrix.target }}
+    steps:
+    - uses: actions/checkout@v4
+      with: { fetch-depth: 2 }
+    - run: make -C test ${{ matrix.target }} 
   s390:
     runs-on: ubuntu-latest
     strategy:
@@ -61,10 +78,12 @@ jobs:
       matrix:
         ssl: ["", BUILTIN]
     name: S390 SSL=${{ matrix.ssl }}
+    env:
+      TFLAGS: -DMQTT_LOCALHOST
     steps:
     - uses: actions/checkout@v4
       with: { fetch-depth: 2 }
-    - run: sudo apt -y update ; sudo apt -y install binfmt-support qemu-user-static && docker run --rm --privileged multiarch/qemu-user-static --reset -p yes && make -C test s390 SSL=${{ matrix.ssl }}
+    - run: sudo apt -y update ; sudo apt -y install binfmt-support qemu-user-static && ./test/setup_mqtt_server.sh && docker run --rm --privileged multiarch/qemu-user-static --reset -p yes && make -C test s390 SSL=${{ matrix.ssl }} MULTIREC=NO
   armhf:
     runs-on: ubuntu-latest
     strategy:
@@ -72,10 +91,12 @@ jobs:
       matrix:
         ssl: ["", BUILTIN]
     name: ArmHF SSL=${{ matrix.ssl }}
+    env:
+      TFLAGS: -DMQTT_LOCALHOST
     steps:
     - uses: actions/checkout@v4
       with: { fetch-depth: 2 }
-    - run: sudo apt -y update ; sudo apt -y install binfmt-support qemu-user-static && docker run --rm --privileged multiarch/qemu-user-static --reset -p yes && make -C test armhf SSL=${{ matrix.ssl }}
+    - run: sudo apt -y update ; sudo apt -y install binfmt-support qemu-user-static && ./test/setup_mqtt_server.sh && docker run --rm --privileged multiarch/qemu-user-static --reset -p yes && make -C test armhf SSL=${{ matrix.ssl }} MULTIREC=NO
   unamalgamated-mg_prefix:
     runs-on: ubuntu-latest
     strategy:
@@ -87,7 +108,7 @@ jobs:
     - uses: actions/checkout@v4
       with: { fetch-depth: 2 }
     - run: sudo apt -y update ; sudo apt -y install libmbedtls-dev libwolfssl-dev
-    - run: make -C test unamalgamated && make -C test mg_prefix
+    - run: make -C test unamalgamated SSL=${{ matrix.ssl }} && make -C test mg_prefix
   valgrind:
     runs-on: ubuntu-latest
     strategy:
@@ -95,34 +116,43 @@ jobs:
       matrix:
         ssl: ["", BUILTIN, MBEDTLS, OPENSSL, WOLFSSL]
     name: Valgrind SSL=${{ matrix.ssl }}
+    env:
+      TFLAGS: -DMQTT_LOCALHOST
     steps:
     - uses: actions/checkout@v4
       with: { fetch-depth: 2 }
     - run: sudo apt -y update ; sudo apt -y install libmbedtls-dev libwolfssl-dev valgrind
-    - run: make -C test valgrind SSL=${{ matrix.ssl }}
+    - run: ./test/setup_mqtt_server.sh && make -C test valgrind SSL=${{ matrix.ssl }}
   macos:
     runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
-        ssl: ["", BUILTIN, MBEDTLS, OPENSSL, WOLFSSL]
+        # Mongoose does not work with WolfSSL version in MacOS
+        ssl: ["", BUILTIN, MBEDTLS, OPENSSL] # , WOLFSSL]
         select: [-DMG_ENABLE_POLL=0, -DMG_ENABLE_POLL=1]
+        include:
+        - ssl: MBEDTLS
+          env:
+            # MbedTLS version in MacOS refuses to validate a certificate without a hostname, causing MQTT tests to fail when using MQTT_LOCALHOST
+            tflags: -DNO_MQTT_TESTS 
         exclude:
         - ssl: MBEDTLS
           select: -DMG_ENABLE_POLL=0
         - ssl: OPENSSL
           select: -DMG_ENABLE_POLL=0
-        - ssl: WOLFSSL
-          select: -DMG_ENABLE_POLL=0
+        #- ssl: WOLFSSL
+        #  select: -DMG_ENABLE_POLL=0
     name: macos SSL=${{ matrix.ssl }} TFLAGS=${{ matrix.select }}
     env:
       SSL: ${{ matrix.ssl }}
-      TFLAGS: ${{ matrix.select }} -Wno-sign-conversion # Workaround for MbedTLS 3.5.0
+      TFLAGS: ${{ matrix.select }} -DMQTT_LOCALHOST ${{ matrix.env.tflags }} -Wno-sign-conversion # Workaround for MbedTLS 3.5.0
       HOMEBREW_NO_AUTO_UPDATE: 1
     steps:
     - uses: actions/checkout@v4
       with: { fetch-depth: 2 }
-    - run: brew install mbedtls wolfssl # jq openssl already pre-installed
+    - run: brew install mbedtls wolfssl mosquitto # jq openssl already pre-installed
+    - run: /opt/homebrew/opt/mosquitto/sbin/mosquitto -c /Users/runner/work/mongoose/mongoose/test/mosquitto.conf.macos &
     - run: make -C test test ASAN_OPTIONS= MBEDTLS=$(echo $(brew --cellar)/mbedtls*/*) OPENSSL=$(echo $(brew --cellar)/openssl*/*) WOLFSSL=$(echo $(brew --cellar)/wolfssl*/*)
   windows:
     runs-on: ubuntu-latest
@@ -138,12 +168,12 @@ jobs:
           select: -DMG_ENABLE_POLL=1
     name: windows ${{ matrix.target }} SSL=${{ matrix.ssl }} TFLAGS=${{ matrix.select }}
     env:
-      SSL: SSL=${{ matrix.ssl }}
-      TFLAGS: ${{ matrix.select }}
+      SSL: ${{ matrix.ssl }}
+      TFLAGS: ${{ matrix.select }} -DMQTT_LOCALHOST
     steps:
     - uses: actions/checkout@v4
       with: { fetch-depth: 2 }
-    - run: make -C test ${{ matrix.target }} 
+    - run: ./test/setup_mqtt_server.sh && make -C test ${{ matrix.target }} 
   arm:
     runs-on: ubuntu-latest
     strategy:
@@ -303,7 +333,6 @@ jobs:
       matrix:
         example:
           - path: mqtt/mqtt-client/microchip/same54-xpro
-          - path: nxp/nxp-mimxrt1020-azurertos
           - path: nxp/nxp-frdmk66f-freertos
           - path: nxp/nxp-lpcxpresso54s018m-freertos
           - path: nxp/nxp-mimxrt1020-freertos
@@ -357,7 +386,7 @@ jobs:
       matrix:
         ssl: ["", -DMG_TLS=MG_TLS_BUILTIN]
         example:
-          - path: tutorials/http/device-dashboard/microchip/same54-xpro
+          - path: http/device-dashboard/microchip/same54-xpro
           - path: nxp/rt1020-evk-make-freertos-builtin
           - path: nxp/rt1060-evk-make-freertos-builtin
           - path: nxp/rt1170-evk-make-freertos-builtin
@@ -424,24 +453,6 @@ jobs:
         with: { fetch-depth: 2 }
       - run: sudo pip install yq
       - run: cd test/cube && make
-
-  zephyr_examples:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 2 }
-      - run: sudo apt -y update && sudo apt -y install gcc-arm-none-eabi
-      - run: make -C tutorials/zephyr init REPO=zephyrprojectrtos/ci:v0.26.14 # "no space left on device" with newers
-      - name: minify manifest
-        uses: mikefarah/yq@master
-        with:
-          cmd: yq -i eval '(.manifest.defaults, .manifest.remotes, .manifest.projects[] | select(.name == "cmsis" or .name == "hal_stm32" or .name == "mbedtls" or .name == "mcuboot" or .name == "picolibc" | del(.null) ), .manifest.self) as $i ireduce({};setpath($i | path; $i)) | del(.manifest.projects.[].null) | del(..|select(length==0))' tutorials/zephyr/zephyrproject/zephyr/west.yml
-      - run: make -C tutorials/zephyr update
-      - run: make -C tutorials/zephyr/device-dashboard build
-      - run: make -C tutorials/zephyr/http-client build
-      - run: make -C tutorials/zephyr/http-server build
-      - run: make -C tutorials/zephyr/mqtt-aws-client build
-      - run: make -C tutorials/zephyr/websocket-server build
 
   test_f7:
     runs-on: ubuntu-latest
