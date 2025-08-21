@@ -1626,6 +1626,8 @@ struct mg_mgr {
   struct mg_tcpip_if *ifp;      // Builtin TCP/IP stack only. Interface pointer
   size_t extraconnsize;         // Builtin TCP/IP stack only. Extra space
   MG_SOCKET_TYPE pipe;          // Socketpair end for mg_wakeup()
+  const char *product_name;
+  const char *directory_listing_css;
 #if MG_ENABLE_FREERTOS_TCP
   SocketSet_t ss;  // NOTE(lsm): referenced from socket struct
 #endif
