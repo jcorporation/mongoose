@@ -2,7 +2,8 @@
 
 #if MG_ENABLE_TCPIP && \
   (defined(MG_ENABLE_DRIVER_IMXRT10) && MG_ENABLE_DRIVER_IMXRT10) || \
-  (defined(MG_ENABLE_DRIVER_IMXRT11) && MG_ENABLE_DRIVER_IMXRT11)
+  (defined(MG_ENABLE_DRIVER_IMXRT11) && MG_ENABLE_DRIVER_IMXRT11) || \
+  (defined(MG_ENABLE_DRIVER_MCXE) && MG_ENABLE_DRIVER_MCXE)
 struct imxrt_enet {
   volatile uint32_t RESERVED0, EIR, EIMR, RESERVED1, RDAR, TDAR, RESERVED2[3],
       ECR, RESERVED3[6], MMFR, MSCR, RESERVED4[7], MIBC, RESERVED5[7], RCR,
@@ -31,9 +32,12 @@ struct imxrt_enet {
 #if defined(MG_ENABLE_DRIVER_IMXRT11) && MG_ENABLE_DRIVER_IMXRT11
 #define ENET ((struct imxrt_enet *) (uintptr_t) 0x40424000U)
 #define ETH_DESC_CNT 5     // Descriptors count
-#else
+#elif defined(MG_ENABLE_DRIVER_IMXRT10) && MG_ENABLE_DRIVER_IMXRT10
 #define ENET ((struct imxrt_enet *) (uintptr_t) 0x402D8000U)
 #define ETH_DESC_CNT 4     // Descriptors count
+#else // MG_ENABLE_DRIVER_MCXE
+#define ENET ((struct imxrt_enet *) (uintptr_t) 0x40079000U)
+#define ETH_DESC_CNT 4     // Descriptor count
 #endif
 
 #define ETH_PKT_SIZE 1536  // Max frame size, 64-bit aligned
@@ -44,15 +48,12 @@ struct enet_desc {
   uint32_t *buffer;  // Data ptr
 };
 
-// TODO(): handle these in a portable compiler-independent CMSIS-friendly way
-#define MG_64BYTE_ALIGNED __attribute__((aligned((64U))))
-
 // Descriptors: in non-cached area (TODO(scaprile)), (37.5.1.22.2 37.5.1.23.2)
 // Buffers: 64-byte aligned (37.3.14)
-static volatile struct enet_desc s_rxdesc[ETH_DESC_CNT] MG_64BYTE_ALIGNED;
-static volatile struct enet_desc s_txdesc[ETH_DESC_CNT] MG_64BYTE_ALIGNED;
-static uint8_t s_rxbuf[ETH_DESC_CNT][ETH_PKT_SIZE] MG_64BYTE_ALIGNED;
-static uint8_t s_txbuf[ETH_DESC_CNT][ETH_PKT_SIZE] MG_64BYTE_ALIGNED;
+static volatile struct enet_desc s_rxdesc[ETH_DESC_CNT] MG_ETH_RAM MG_64BYTE_ALIGNED;
+static volatile struct enet_desc s_txdesc[ETH_DESC_CNT] MG_ETH_RAM MG_64BYTE_ALIGNED;
+static uint8_t s_rxbuf[ETH_DESC_CNT][ETH_PKT_SIZE] MG_ETH_RAM MG_64BYTE_ALIGNED;
+static uint8_t s_txbuf[ETH_DESC_CNT][ETH_PKT_SIZE] MG_ETH_RAM MG_64BYTE_ALIGNED;
 static struct mg_tcpip_if *s_ifp;  // MIP interface
 
 static uint16_t enet_read_phy(uint8_t addr, uint8_t reg) {
@@ -189,9 +190,14 @@ static bool mg_tcpip_driver_imxrt_poll(struct mg_tcpip_if *ifp, bool s1) {
   return up;
 }
 
-void ENET_IRQHandler(void);
 static uint32_t s_rxno;
+#if !defined(MG_ENABLE_DRIVER_MCXE)
+void ENET_IRQHandler(void);
 void ENET_IRQHandler(void) {
+#else
+void ENET_Receive_IRQHandler(void);
+void ENET_Receive_IRQHandler(void) {
+#endif
   ENET->EIR = MG_BIT(25);  // Ack IRQ
   // Frame received, loop
   for (uint32_t i = 0; i < 10; i++) {  // read as they arrive but not forever

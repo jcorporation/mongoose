@@ -4,13 +4,19 @@
 #include "math.h"
 
 static int s_num_tests = 0;
+static bool s_error = false;
 
+#ifdef NO_ABORT
+static int s_abort = 0;
+#define ABORT() ++s_abort, s_error = true
+#else
 #ifdef NO_SLEEP_ABORT
 #define ABORT() abort()
 #else
 #define ABORT()                       \
   sleep(2); /* 2s, GH print reason */ \
   abort();
+#endif
 #endif
 
 #define ASSERT(expr)                                            \
@@ -316,6 +322,8 @@ static void test_iobuf(void) {
   mg_iobuf_add(&io, io.len, "a", 1);
   ASSERT(io.buf != NULL && io.size == 20 && io.len == 11);
   ASSERT(memcmp(io.buf, "xhi!123456a", io.len) == 0);
+  mg_iobuf_resize(&io, 1);
+  ASSERT(io.buf != NULL && io.size == 10 && io.len == 10);
   mg_iobuf_free(&io);
 }
 
@@ -867,8 +875,10 @@ static int fetch(struct mg_mgr *mgr, char *buf, const char *url,
     if (strstr(url, "localhost") != NULL) {
       // Local connection, use self-signed certificates
       opts.ca = mg_unpacked("/certs/ca.crt");
-      // opts.cert = mg_str(s_tls_cert);
-      // opts.key = mg_str(s_tls_key);
+      if (strstr(url, "23456") != NULL) { // hinted from caller
+        opts.cert = mg_unpacked("/certs/client.crt");
+        opts.key = mg_unpacked("/certs/client.key");
+      }
     }
     mg_tls_init(c, &opts);
   }
@@ -1414,7 +1424,6 @@ static void test_tls(void) {
   struct mg_str bd;
   ASSERT(data.buf != NULL && data.len > 0);
   memset(&opts, 0, sizeof(opts));
-  // opts.ca = mg_str(s_tls_ca);
   opts.cert = mg_unpacked("/certs/server.crt");
   opts.key = mg_unpacked("/certs/server.key");
   mg_mgr_init(&mgr);
@@ -1463,6 +1472,20 @@ static void test_tls(void) {
       "is 1.3 only; re-enable when other stacks can be easily configured for "
       "1.3\n");
 #endif
+
+  // Repeat the simplest test with two-way authentication
+  opts.ca = mg_unpacked("/certs/ca.crt"); // configure the server for two-way
+  // make it fail: the client will not use 2-way
+  ASSERT(fetch(&mgr, buf, url, "GET /a.txt HTTP/1.0\n\n") != 200);
+  // make it work
+  mg_mgr_free(&mgr);
+  ASSERT(mgr.conns == NULL);
+  mg_mgr_init(&mgr);
+  url = "https://localhost:23456"; // port # hints the client to use two-way
+  c = mg_http_listen(&mgr, url, eh1, &opts);
+  ASSERT(c != NULL);
+  ASSERT(fetch(&mgr, buf, url, "GET /a.txt HTTP/1.0\n\n") == 200);
+  ASSERT(cmpbody(buf, "hello\n") == 0);
   mg_mgr_free(&mgr);
   ASSERT(mgr.conns == NULL);
 #endif
@@ -1515,7 +1538,7 @@ static void test_http_client(void) {
   opts.name = mg_url_host(url);
 #if MG_TLS == MG_TLS_BUILTIN
   // our TLS does not search for the proper CA in a bundle
-  opts.ca = mg_file_read(&mg_fs_posix, "data/e5.crt");
+  opts.ca = mg_file_read(&mg_fs_posix, "data/e8.crt");
 #endif
   c = mg_http_connect(&mgr, url, f3, &ok);
   ASSERT(c != NULL);
@@ -1525,7 +1548,7 @@ static void test_http_client(void) {
   ASSERT(ok == 200);
   mg_mgr_poll(&mgr, 1);
 
-  // Make host validationfail
+  // Make host validation fail
   c = mg_http_connect(&mgr, url, f3, &ok);
   ASSERT(c != NULL);
   opts.name = mg_str("dummy");  // Set some invalid hostname value
@@ -1534,6 +1557,16 @@ static void test_http_client(void) {
   for (i = 0; i < 500 && ok <= 0; i++) mg_mgr_poll(&mgr, 10);
   MG_INFO(("OK: %d", ok));
   ASSERT(ok == 777);
+  mg_mgr_poll(&mgr, 1);
+  // Skip host validation
+  c = mg_http_connect(&mgr, url, f3, &ok);
+  ASSERT(c != NULL);
+  opts.name = mg_str("");
+  mg_tls_init(c, &opts);
+  ok = 0;
+  for (i = 0; i < 500 && ok <= 0; i++) mg_mgr_poll(&mgr, 10);
+  MG_INFO(("OK: %d", ok));
+  ASSERT(ok == 200);
   mg_mgr_poll(&mgr, 1);
   opts.name = mg_url_host(url);
 #if MG_TLS == MG_TLS_BUILTIN
@@ -2232,6 +2265,16 @@ static void test_str(void) {
   ASSERT(sn("%s ", "a"));
   ASSERT(sn("%s %s", "a", "b"));
   ASSERT(sn("%2s %s", "a", "b"));
+  { // mg_queue_printf()
+	struct mg_queue q;
+	char buf[128];
+	uint32_t p = 0xffffffff;
+	size_t len;
+	mg_queue_init(&q, buf, sizeof(buf));
+	len = mg_queue_printf(&q, "A%p%p%pB", p, p, p);
+  ASSERT(len == 32);
+  ASSERT(memcmp(buf + 4, "A0xffffffff0xffffffff0xffffffffB", 32) == 0);
+  }
 
   // Non-standard formatting
   {
@@ -2574,6 +2617,8 @@ static void test_util(void) {
   const char *e;
   char buf[100], *s;
   struct mg_addr a;
+  uint64_t ipv3;
+  uint8_t d64[8] = {0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef};
   uint32_t ipv4;
   uint16_t port;
   struct mg_str data;
@@ -2607,6 +2652,20 @@ static void test_util(void) {
   ASSERT(((uint8_t *) &ipv4)[0] == 0xef && ((uint8_t *) &ipv4)[1] == 0x23 &&
          ((uint8_t *) &ipv4)[2] == 0x45);
   ASSERT(MG_LOAD_BE24(&ipv4) == 0xef2345);
+
+  memcpy(&ipv3, d64, sizeof(ipv3));
+#if defined(_MSC_VER) && _MSC_VER < 1700
+  // VC98 doesn't suppport LL suffix
+#else
+  ASSERT(ipv3 == mg_htonll(0x1234567890abcdefLL));
+  ASSERT(mg_ntohll(ipv3) == 0x1234567890abcdefLL);
+#endif
+  MG_STORE_BE64(&ipv3, 0x5678abcd12349ef0);
+  ASSERT(((uint8_t *) &ipv3)[0] == 0x56 && ((uint8_t *) &ipv3)[1] == 0x78 &&
+         ((uint8_t *) &ipv3)[2] == 0xab && ((uint8_t *) &ipv3)[3] == 0xcd &&
+         ((uint8_t *) &ipv3)[4] == 0x12 && ((uint8_t *) &ipv3)[5] == 0x34 &&
+         ((uint8_t *) &ipv3)[6] == 0x9e && ((uint8_t *) &ipv3)[7] == 0xf0);
+  ASSERT(MG_LOAD_BE64(&ipv3) == 0x5678abcd12349ef0);
 
   memset(a.ip, 0xa5, sizeof(a.ip));
   ASSERT(mg_aton(mg_str("1:2:3:4:5:6:7:8"), &a) == true);
@@ -2918,6 +2977,14 @@ static void eZ(struct mg_connection *c, int ev, void *ev_data) {
   (void) ev_data;
 }
 
+static void eS(struct mg_connection *c, int ev, void *ev_data) {
+  if (ev == MG_EV_HTTP_MSG) {
+    ASSERT (mg_send(c, "NADA", 0));
+    mg_http_reply(c, 200, "", "abcd");
+  }
+  (void) ev_data;
+}
+
 // Do not delete chunks as they arrive
 static void eh4(struct mg_connection *c, int ev, void *ev_data) {
   uint32_t *crc = (uint32_t *) c->fn_data;
@@ -2953,6 +3020,9 @@ static void test_http_chunked_case(mg_event_handler_t s, mg_event_handler_t c,
 }
 
 static void test_http_chunked(void) {
+  // test mg_send allows calls with 0 length
+  test_http_chunked_case(eS, eh4, 1, "abcd");
+
   // Non-chunked encoding
   test_http_chunked_case(eY, eh4, 1, "abcd");  // Chunks not deleted
   test_http_chunked_case(eY, eh4, 2, "abcdabcd");
@@ -3176,7 +3246,7 @@ static void test_udp(void) {
 }
 
 static void test_check_ip_acl(void) {
-  struct mg_addr ip = {{1, 2, 3, 4}, 0, 0, false};  // 1.2.3.4
+  struct mg_addr ip = {{{1, 2, 3, 4}}, 0, 0, false};  // 1.2.3.4
   ASSERT(mg_check_ip_acl(mg_str(NULL), &ip) == 1);
   ASSERT(mg_check_ip_acl(mg_str(""), &ip) == 1);
   ASSERT(mg_check_ip_acl(mg_str("invalid"), &ip) == -1);
@@ -3953,54 +4023,124 @@ static void test_crypto(void) {
   test_rsa();
 }
 
+
+#define DASHBOARD(x)  printf("HEALTH_DASHBOARD\t\"%s\": %s,\n", x, s_error ? "false":"true");
+
 int main(void) {
   const char *debug_level = getenv("V");
   if (debug_level == NULL) debug_level = "3";
   mg_log_set(atoi(debug_level));
 
+  s_error = false;
   test_crypto();
+  DASHBOARD("crypto");
+
+  s_error = false;
   test_split();
-  test_json();
-  test_queue();
-  test_rpc();
+  test_util();
   test_str();
   test_match();
+  test_crc32();
+  DASHBOARD("misc");
+
+  s_error = false;
+  test_json();
+  DASHBOARD("json");
+
+  s_error = false;
+  test_queue();
+  DASHBOARD("queue");
+
+  s_error = false;
+  test_rpc();
+  DASHBOARD("rpc");
+
+  s_error = false;
+  test_check_ip_acl();
+  DASHBOARD("ip_acl");
+
+  s_error = false;
+  test_udp();
+  DASHBOARD("udp");
+
+  s_error = false;
   test_get_header_var();
+  test_http_get_var();
   test_http_parse();
   test_rewrites();
-  test_check_ip_acl();
-  test_udp();
-  test_packed();
-  test_crc32();
   test_multipart();
   test_invalid_listen_addr();
   test_http_chunked();
-  test_http_upload();
-  test_http_stream_buffer();
-  test_util();
+  DASHBOARD("http_support");
+
+  s_error = false;
+  test_packed();
+  DASHBOARD("packed_fs");
+
+  s_error = false;
   test_dns();
+  DASHBOARD("dns");
+
+  s_error = false;
   test_timer();
+  DASHBOARD("timers");
+
+  s_error = false;
   test_url();
+  DASHBOARD("url");
+
+  s_error = false;
   test_iobuf();
+  DASHBOARD("iobuf");
+
+  s_error = false;
   test_base64();
-  test_http_get_var();
+  DASHBOARD("base64");
+
+  s_error = false;
   test_tls();
+  DASHBOARD("tls");
+
+  s_error = false;
   test_ws();
   test_ws_fragmentation();
+  DASHBOARD("ws");
+
+  s_error = false;
+  test_http_upload();
+  test_http_stream_buffer();
   test_http_server();
   test_http_404();
   test_http_no_content_length();
   test_http_pipeline();
   test_http_range();
+  DASHBOARD("http_server");
+
 #ifndef LOCALHOST_ONLY
+  s_error = false;
   test_sntp();
+  DASHBOARD("sntp");
+
+  s_error = false;
   test_mqtt();  // sorry, MQTT_LOCALHOST is also skipped 
+  DASHBOARD("mqtt");
+
+  s_error = false;
   test_http_client();
+  DASHBOARD("http_client");
+
 #else
   (void) test_sntp, (void) test_mqtt, (void) test_http_client;
 #endif
+  s_error = false;
   test_poll();
-  printf("SUCCESS. Total tests: %d\n", s_num_tests);
+  printf("HEALTH_DASHBOARD\t\"poll\": %s\n", s_error ? "false":"true");
+ // last entry with no comma
 
+#ifdef NO_ABORT
+  if (s_abort != 0) return EXIT_FAILURE;
+#endif
+
+  printf("SUCCESS. Total tests: %d\n", s_num_tests);
   return EXIT_SUCCESS;
 }
