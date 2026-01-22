@@ -14,11 +14,11 @@ struct mg_dns {
 };
 
 struct mg_addr {
-  union {    // Holds IPv4 or IPv6 address, in network byte order
+  union {  // Holds IPv4 or IPv6 address, in network byte order
     uint8_t ip[16];
     uint32_t ip4;
     uint64_t ip6[2];
-  };
+  } addr;
   uint16_t port;     // TCP or UDP port in network byte order
   uint8_t scope_id;  // IPv6 scope ID
   bool is_ip6;       // True when address is IPv6 address
@@ -112,3 +112,4 @@ struct mg_timer *mg_timer_add(struct mg_mgr *mgr, uint64_t milliseconds,
 struct mg_connection *mg_connect_svc(struct mg_mgr *mgr, const char *url,
                                      mg_event_handler_t fn, void *fn_data,
                                      mg_event_handler_t pfn, void *pfn_data);
+void mg_multicast_restore(struct mg_connection *c, uint8_t *from);

@@ -439,7 +439,7 @@ static const char *s_ca_cert =
 #else
 #define MQTTS_URL "mqtts://broker.hivemq.com:8883"
 #define MQTTS_CA mg_unpacked("/data/ca.pem")
-#endif // MQTT_LOCALHOST
+#endif  // MQTT_LOCALHOST
 #endif
 
 struct mqtt_data {
@@ -454,6 +454,7 @@ struct mqtt_data {
 #define flags_received (1 << 2)
 #define flags_released (1 << 3)
 #define flags_completed (1 << 4)
+#define flags_unsubscribed (1 << 5)
 
 static void mqtt_cb(struct mg_connection *c, int ev, void *ev_data) {
   struct mqtt_data *test_data = (struct mqtt_data *) c->fn_data;
@@ -463,7 +464,7 @@ static void mqtt_cb(struct mg_connection *c, int ev, void *ev_data) {
     struct mg_tls_opts opts;
     memset(&opts, 0, sizeof(opts));
     opts.ca = MQTTS_CA;
-#if defined( MQTT_LOCALHOST) && MG_TLS != MG_TLS_BUILTIN
+#if defined(MQTT_LOCALHOST) && MG_TLS != MG_TLS_BUILTIN
     MG_ERROR(("Hostname not tested"));
 #else
     opts.name = mg_url_host(MQTTS_URL);
@@ -487,6 +488,8 @@ static void mqtt_cb(struct mg_connection *c, int ev, void *ev_data) {
       test_data->flags |= flags_released;
     } else if (mm->cmd == MQTT_CMD_PUBCOMP) {
       test_data->flags |= flags_completed;
+    } else if (mm->cmd == MQTT_CMD_UNSUBACK) {
+      test_data->flags = flags_unsubscribed;
     }
   } else if (ev == MG_EV_MQTT_MSG) {
     struct mg_mqtt_message *mm = (struct mg_mqtt_message *) ev_data;
@@ -499,7 +502,7 @@ static void mqtt_cb(struct mg_connection *c, int ev, void *ev_data) {
       size_t pos = 0, i = 0, j = 0;
       struct mg_mqtt_prop prop;
 
-      for (i = 0; i < 5 ; i++) {
+      for (i = 0; i < 5; i++) {
         ASSERT((pos = mg_mqtt_next_prop(mm, &prop, pos)) > 0);
         if (prop.id == MQTT_PROP_MESSAGE_EXPIRY_INTERVAL) {
           ASSERT(prop.iv == 10);
@@ -508,14 +511,20 @@ static void mqtt_cb(struct mg_connection *c, int ev, void *ev_data) {
           j += 2;
           continue;
         } else if (prop.id == MQTT_PROP_CONTENT_TYPE) {
-          ASSERT(strncmp(prop.val.buf, "test_content_val_2", prop.val.len) == 0 && prop.val.len == strlen("test_content_val_2"));
+          ASSERT(strncmp(prop.val.buf, "test_content_val_2", prop.val.len) ==
+                     0 &&
+                 prop.val.len == strlen("test_content_val_2"));
           j += 4;
         } else if (prop.id == MQTT_PROP_USER_PROPERTY) {
-          if (strncmp(prop.key.buf, "test_key_1", prop.key.len) == 0 && prop.key.len == strlen("test_key_1")) {
-            ASSERT(strncmp(prop.val.buf, "test_value_1", prop.val.len) == 0 && prop.val.len == strlen("test_value_1"));
+          if (strncmp(prop.key.buf, "test_key_1", prop.key.len) == 0 &&
+              prop.key.len == strlen("test_key_1")) {
+            ASSERT(strncmp(prop.val.buf, "test_value_1", prop.val.len) == 0 &&
+                   prop.val.len == strlen("test_value_1"));
             j += 8;
-          } else if (strncmp(prop.key.buf, "test_key_2", prop.key.len) == 0 && prop.key.len == strlen("test_key_2")) {
-            ASSERT(strncmp(prop.val.buf, "test_value_2", prop.val.len) == 0 && prop.val.len == strlen("test_value_2"));
+          } else if (strncmp(prop.key.buf, "test_key_2", prop.key.len) == 0 &&
+                     prop.key.len == strlen("test_key_2")) {
+            ASSERT(strncmp(prop.val.buf, "test_value_2", prop.val.len) == 0 &&
+                   prop.val.len == strlen("test_value_2"));
             j += 16;
           } else {
             ASSERT(0);
@@ -759,6 +768,12 @@ static void test_mqtt_ver(uint8_t mqtt_version) {
   memset(mbuf + 1, 0, sizeof(mbuf) - 1);
   test_data.flags = 0;
 
+  opts.props = 0; opts.num_props = 0;
+  mg_mqtt_unsub(c, &opts);
+  for (i = 0; i < 500 && test_data.flags == 0; i++) mg_mgr_poll(&mgr, 10);
+  ASSERT(test_data.flags == flags_unsubscribed);
+  test_data.flags = 0;
+
   // dirty disconnect
   mg_mgr_free(&mgr);
   ASSERT(mgr.conns == NULL);
@@ -875,7 +890,7 @@ static int fetch(struct mg_mgr *mgr, char *buf, const char *url,
     if (strstr(url, "localhost") != NULL) {
       // Local connection, use self-signed certificates
       opts.ca = mg_unpacked("/certs/ca.crt");
-      if (strstr(url, "23456") != NULL) { // hinted from caller
+      if (strstr(url, "23456") != NULL) {  // hinted from caller
         opts.cert = mg_unpacked("/certs/client.crt");
         opts.key = mg_unpacked("/certs/client.key");
       }
@@ -1464,7 +1479,8 @@ static void test_tls(void) {
     ASSERT(cmpbody(buf, data.buf) == 0);  // "thefile" links to Makefile
     ASSERT(system("killall tls_multirec/server") == 0);
   } else {
-    MG_ERROR(("SKIPPED TLS MULTIPLE RECORDS TEST, tls_multirec/server NOT PRESENT"));
+    MG_ERROR(
+        ("SKIPPED TLS MULTIPLE RECORDS TEST, tls_multirec/server NOT PRESENT"));
   }
 #else
   printf(
@@ -1474,14 +1490,14 @@ static void test_tls(void) {
 #endif
 
   // Repeat the simplest test with two-way authentication
-  opts.ca = mg_unpacked("/certs/ca.crt"); // configure the server for two-way
+  opts.ca = mg_unpacked("/certs/ca.crt");  // configure the server for two-way
   // make it fail: the client will not use 2-way
   ASSERT(fetch(&mgr, buf, url, "GET /a.txt HTTP/1.0\n\n") != 200);
   // make it work
   mg_mgr_free(&mgr);
   ASSERT(mgr.conns == NULL);
   mg_mgr_init(&mgr);
-  url = "https://localhost:23456"; // port # hints the client to use two-way
+  url = "https://localhost:23456";  // port # hints the client to use two-way
   c = mg_http_listen(&mgr, url, eh1, &opts);
   ASSERT(c != NULL);
   ASSERT(fetch(&mgr, buf, url, "GET /a.txt HTTP/1.0\n\n") == 200);
@@ -1496,7 +1512,8 @@ static void f3(struct mg_connection *c, int ev, void *ev_data) {
   // MG_INFO(("%d", ev));
   if (ev == MG_EV_CONNECT) {
     // c->is_hexdumping = 1;
-    ASSERT((c->loc.ip[0] != 0));  // Make sure that c->loc address is populated
+    ASSERT((c->loc.addr.ip[0] !=
+            0));  // Make sure that c->loc address is populated
     mg_printf(c, "GET /%s HTTP/1.0\r\nHost: %s\r\n\r\n",
               c->rem.is_ip6 ? "" : "/robots.txt",
               c->rem.is_ip6 ? "ipv6.google.com" : "cesanta.com");
@@ -2265,15 +2282,15 @@ static void test_str(void) {
   ASSERT(sn("%s ", "a"));
   ASSERT(sn("%s %s", "a", "b"));
   ASSERT(sn("%2s %s", "a", "b"));
-  { // mg_queue_printf()
-	struct mg_queue q;
-	char buf[128];
-	uint32_t p = 0xffffffff;
-	size_t len;
-	mg_queue_init(&q, buf, sizeof(buf));
-	len = mg_queue_printf(&q, "A%p%p%pB", p, p, p);
-  ASSERT(len == 32);
-  ASSERT(memcmp(buf + 4, "A0xffffffff0xffffffff0xffffffffB", 32) == 0);
+  {  // mg_queue_printf()
+    struct mg_queue q;
+    char buf[128];
+    uint32_t p = 0xffffffff;
+    size_t len;
+    mg_queue_init(&q, buf, sizeof(buf));
+    len = mg_queue_printf(&q, "A%p%p%pB", p, p, p);
+    ASSERT(len == 32);
+    ASSERT(memcmp(buf + 4, "A0xffffffff0xffffffff0xffffffffB", 32) == 0);
   }
 
   // Non-standard formatting
@@ -2478,7 +2495,7 @@ static void test_str(void) {
     char buf[100];
     struct mg_addr a;
     uint32_t addr = mg_htonl(0x2000001);
-    memcpy(a.ip, &addr, sizeof(uint32_t));
+    memcpy(a.addr.ip, &addr, sizeof(uint32_t));
     a.port = mg_htons(3);
     a.is_ip6 = false;
 
@@ -2488,8 +2505,8 @@ static void test_str(void) {
            11);
     ASSERT(strcmp(buf, "2.0.0.1:3 7") == 0);
 
-    memset(a.ip, 0, sizeof(a.ip));
-    a.ip[0] = 1, a.ip[1] = 100, a.ip[2] = 33;
+    memset(a.addr.ip, 0, sizeof(a.addr.ip));
+    a.addr.ip[0] = 1, a.addr.ip[1] = 100, a.addr.ip[2] = 33;
     a.is_ip6 = true;
     ASSERT(mg_snprintf(buf, sizeof(buf), "%M %d", mg_print_ip, &a, 7) == 24);
     ASSERT(strcmp(buf, "[164:2100:0:0:0:0:0:0] 7") == 0);
@@ -2636,7 +2653,7 @@ static void test_util(void) {
   ASSERT(mg_aton(mg_str("0.0.0.-1"), &a) == false);
   ASSERT(mg_aton(mg_str("127.0.0.1"), &a) == true);
   ASSERT(a.is_ip6 == false);
-  memcpy(&ipv4, a.ip, sizeof(ipv4));
+  memcpy(&ipv4, &a.addr.ip4, sizeof(ipv4));
   ASSERT(ipv4 == mg_htonl(0x7f000001));
   ASSERT(mg_ntohl(ipv4) == 0x7f000001);
   MG_STORE_BE32(&ipv4, 0x5678abcd);
@@ -2667,48 +2684,48 @@ static void test_util(void) {
          ((uint8_t *) &ipv3)[6] == 0x9e && ((uint8_t *) &ipv3)[7] == 0xf0);
   ASSERT(MG_LOAD_BE64(&ipv3) == 0x5678abcd12349ef0);
 
-  memset(a.ip, 0xa5, sizeof(a.ip));
+  memset(a.addr.ip, 0xa5, sizeof(a.addr.ip)), a.is_ip6 = false;
   ASSERT(mg_aton(mg_str("1:2:3:4:5:6:7:8"), &a) == true);
   ASSERT(a.is_ip6 == true);
   e = "\x00\x01\x00\x02\x00\x03\x00\x04\x00\x05\x00\x06\x00\x07\x00\x08";
-  ASSERT(memcmp(a.ip, e, sizeof(a.ip)) == 0);
+  ASSERT(memcmp(&a.addr.ip6, e, sizeof(a.addr.ip6)) == 0);
 
-  memset(a.ip, 0xa5, sizeof(a.ip));
+  memset(a.addr.ip, 0xa5, sizeof(a.addr.ip)), a.is_ip6 = false;
   ASSERT(mg_aton(mg_str("1:2::3"), &a) == true);
   ASSERT(a.is_ip6 == true);
   e = "\x00\x01\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03";
-  ASSERT(memcmp(a.ip, e, sizeof(a.ip)) == 0);
+  ASSERT(memcmp(&a.addr.ip6, e, sizeof(a.addr.ip6)) == 0);
 
-  memset(a.ip, 0xaa, sizeof(a.ip));
+  memset(a.addr.ip, 0xaa, sizeof(a.addr.ip)), a.is_ip6 = false;
   ASSERT(mg_aton(mg_str("1::1"), &a) == true);
   ASSERT(a.is_ip6 == true);
   e = "\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01";
-  ASSERT(memcmp(a.ip, e, sizeof(a.ip)) == 0);
+  ASSERT(memcmp(&a.addr.ip6, e, sizeof(a.addr.ip6)) == 0);
 
-  memset(a.ip, 0xaa, sizeof(a.ip));
+  memset(a.addr.ip, 0xaa, sizeof(a.addr.ip)), a.is_ip6 = false;
   ASSERT(mg_aton(mg_str("::fFff:1.2.3.4"), &a) == true);
   ASSERT(a.is_ip6 == true);
   e = "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x01\x02\x03\x04";
-  ASSERT(memcmp(a.ip, e, sizeof(a.ip)) == 0);
+  ASSERT(memcmp(&a.addr.ip6, e, sizeof(a.addr.ip6)) == 0);
 
-  memset(a.ip, 0xaa, sizeof(a.ip));
+  memset(a.addr.ip, 0xaa, sizeof(a.addr.ip)), a.is_ip6 = false;
   ASSERT(mg_aton(mg_str("::1"), &a) == true);
   ASSERT(a.is_ip6 == true);
   ASSERT(a.scope_id == 0);
   e = "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01";
-  ASSERT(memcmp(a.ip, e, sizeof(a.ip)) == 0);
+  ASSERT(memcmp(&a.addr.ip6, e, sizeof(a.addr.ip6)) == 0);
 
-  memset(a.ip, 0xaa, sizeof(a.ip));
+  memset(a.addr.ip, 0xaa, sizeof(a.addr.ip)), a.is_ip6 = false;
   ASSERT(mg_aton(mg_str("1::"), &a) == true);
   ASSERT(a.is_ip6 == true);
   e = "\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
-  ASSERT(memcmp(a.ip, e, sizeof(a.ip)) == 0);
+  ASSERT(memcmp(&a.addr.ip6, e, sizeof(a.addr.ip6)) == 0);
 
-  memset(a.ip, 0xaa, sizeof(a.ip));
+  memset(a.addr.ip, 0xaa, sizeof(a.addr.ip)), a.is_ip6 = false;
   ASSERT(mg_aton(mg_str("2001:4860:4860::8888"), &a) == true);
   ASSERT(a.is_ip6 == true);
   e = "\x20\x01\x48\x60\x48\x60\x00\x00\x00\x00\x00\x00\x00\x00\x88\x88";
-  ASSERT(memcmp(a.ip, e, sizeof(a.ip)) == 0);
+  ASSERT(memcmp(&a.addr.ip6, e, sizeof(a.addr.ip6)) == 0);
 
   ASSERT(mg_url_decode("a=%", 3, buf, sizeof(buf), 0) < 0);
   ASSERT(mg_url_decode("&&&a=%", 6, buf, sizeof(buf), 0) < 0);
@@ -2717,22 +2734,22 @@ static void test_util(void) {
   ASSERT(mg_url_decode("a=%123", 6, buf, sizeof(buf), 0) == 4 &&
          buf[2] == 0x12 && buf[3] == '3');
 
-  memset(a.ip, 0xaa, sizeof(a.ip));
+  memset(&a, 0, sizeof(a));
   ASSERT(mg_aton(mg_str("::1%1"), &a) == true);
   ASSERT(a.is_ip6 == true);
   ASSERT(a.scope_id == 1);
 
-  memset(a.ip, 0xaa, sizeof(a.ip));
+  memset(&a, 0, sizeof(a));
   ASSERT(mg_aton(mg_str("abcd::aabb:ccdd%17"), &a) == true);
   ASSERT(a.is_ip6 == true);
   ASSERT(a.scope_id == 17);
 
-  memset(a.ip, 0xaa, sizeof(a.ip));
+  memset(&a, 0xaa, sizeof(a)), a.is_ip6 = false;
   ASSERT(mg_aton(mg_str("::1%17"), &a) == true);
   ASSERT(a.is_ip6 == true);
   ASSERT(a.scope_id == 17);
 
-  memset(a.ip, 0xaa, sizeof(a.ip));
+  memset(&a, 0xaa, sizeof(a)), a.is_ip6 = false;
   ASSERT(mg_aton(mg_str("::1%255"), &a) == true);
   ASSERT(a.is_ip6 == true);
   ASSERT(a.scope_id == 255);
@@ -2979,7 +2996,7 @@ static void eZ(struct mg_connection *c, int ev, void *ev_data) {
 
 static void eS(struct mg_connection *c, int ev, void *ev_data) {
   if (ev == MG_EV_HTTP_MSG) {
-    ASSERT (mg_send(c, "NADA", 0));
+    ASSERT(mg_send(c, "NADA", 0));
     mg_http_reply(c, 200, "", "abcd");
   }
   (void) ev_data;
@@ -4023,8 +4040,8 @@ static void test_crypto(void) {
   test_rsa();
 }
 
-
-#define DASHBOARD(x)  printf("HEALTH_DASHBOARD\t\"%s\": %s,\n", x, s_error ? "false":"true");
+#define DASHBOARD(x) \
+  printf("HEALTH_DASHBOARD\t\"%s\": %s,\n", x, s_error ? "false" : "true");
 
 int main(void) {
   const char *debug_level = getenv("V");
@@ -4122,7 +4139,7 @@ int main(void) {
   DASHBOARD("sntp");
 
   s_error = false;
-  test_mqtt();  // sorry, MQTT_LOCALHOST is also skipped 
+  test_mqtt();  // sorry, MQTT_LOCALHOST is also skipped
   DASHBOARD("mqtt");
 
   s_error = false;
@@ -4134,13 +4151,19 @@ int main(void) {
 #endif
   s_error = false;
   test_poll();
-  printf("HEALTH_DASHBOARD\t\"poll\": %s\n", s_error ? "false":"true");
- // last entry with no comma
+  printf("HEALTH_DASHBOARD\t\"poll\": %s\n", s_error ? "false" : "true");
+  // last entry with no comma
 
 #ifdef NO_ABORT
   if (s_abort != 0) return EXIT_FAILURE;
 #endif
 
+#if defined(MBEDTLS_VERSION_NUMBER) && MBEDTLS_VERSION_NUMBER >= 0x03000000 && \
+    defined(MBEDTLS_PSA_CRYPTO_C)
+  // Call mbedtls_psa_crypto_free() here to avoid triggering memory-leak
+  // detectors. We are actually freeing all our resources and leaving
+  mbedtls_psa_crypto_free();
+#endif
   printf("SUCCESS. Total tests: %d\n", s_num_tests);
   return EXIT_SUCCESS;
 }

@@ -29,6 +29,11 @@ jobs:
           select: "-DMG_ENABLE_POLL=0 -DMG_ENABLE_EPOLL=0"
         - ssl: WOLFSSL
           select: "-DMG_ENABLE_POLL=1 -DMG_ENABLE_EPOLL=0"
+        include:
+        - ssl: BUILTIN
+          cc: gcc
+          target: test
+          select: "-DMG_ENABLE_POLL=0 -DMG_ENABLE_EPOLL=1 -DMG_ENABLE_CHACHA20=0"
     name: linux ${{ matrix.target }} CC=${{ matrix.cc }} SSL=${{ matrix.ssl }} TFLAGS=${{ matrix.select }}
     env:
       CC: ${{ matrix.cc }}
@@ -87,7 +92,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with: { fetch-depth: 2 }
-    - run: make -C test ${{ matrix.target }} 
+    - run: make -C test ${{ matrix.target }}
   s390:
     runs-on: ubuntu-latest
     strategy:
@@ -145,17 +150,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Mongoose does not work with WolfSSL version in MacOS
-        ssl: ["", BUILTIN, MBEDTLS, OPENSSL] # , WOLFSSL]
+        ssl: ["", BUILTIN, MBEDTLS, OPENSSL] # , WOLFSSL] # see issue#2821
         select: [-DMG_ENABLE_POLL=0, -DMG_ENABLE_POLL=1]
-        include:
-        - ssl: MBEDTLS
-          env:
-            # MbedTLS version in MacOS refuses to validate a certificate without a hostname, causing MQTT tests to fail when using MQTT_LOCALHOST
-            tflags: -DNO_MQTT_TESTS 
         exclude:
         - ssl: MBEDTLS
           select: -DMG_ENABLE_POLL=0
+        - ssl: MBEDTLS                # see issue#2694
+          select: -DMG_ENABLE_POLL=1
         - ssl: OPENSSL
           select: -DMG_ENABLE_POLL=0
         #- ssl: WOLFSSL
@@ -163,7 +164,7 @@ jobs:
     name: macos SSL=${{ matrix.ssl }} TFLAGS=${{ matrix.select }}
     env:
       SSL: ${{ matrix.ssl }}
-      TFLAGS: ${{ matrix.select }} -DMQTT_LOCALHOST ${{ matrix.env.tflags }} -Wno-sign-conversion # Workaround for MbedTLS 3.5.0
+      TFLAGS: ${{ matrix.select }} -DMQTT_LOCALHOST ${{ matrix.env.tflags }} -DNO_ABORT -Wno-sign-conversion -Wno-undef # Workarounds for MbedTLS
       HOMEBREW_NO_AUTO_UPDATE: 1
     steps:
     - uses: actions/checkout@v4
@@ -195,7 +196,7 @@ jobs:
     name: windows ${{ matrix.target }} SSL=${{ matrix.ssl }} TFLAGS=${{ matrix.select }}
     env:
       SSL: ${{ matrix.ssl }}
-      TFLAGS: ${{ matrix.select }} -DMQTT_LOCALHOST
+      TFLAGS: ${{ matrix.select }} -DMQTT_LOCALHOST -DNO_ABORT
     steps:
     - uses: actions/checkout@v4
       with: { fetch-depth: 2 }
@@ -509,7 +510,7 @@ jobs:
     - run: make -C tutorials/stm32/nucleo-f746zg-make-freertos-builtin test VCON_API_KEY=${{secrets.VCON_API_KEY}}
     - run: make -C tutorials/stm32/nucleo-f746zg-make-freertos-tcp test VCON_API_KEY=${{secrets.VCON_API_KEY}}
     - name: Cube
-      run: echo # nothing specific to install or do
+      run: sudo pip install yq
 #    - run: make -C test/cube PROJECTS=../../tutorials/stm32/nucleo-f746zg-cube-baremetal-builtin VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=5
 #    - run: make -C test/cube PROJECTS=../../tutorials/stm32/nucleo-f746zg-cube-freertos-builtin VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=5    
     - run: make -C test/cube PROJECTS=../../tutorials/stm32/nucleo-f746zg-cube-freertos-lwip VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=5
@@ -524,7 +525,7 @@ jobs:
     - run: make -C tutorials/stm32/nucleo-f429zi-make-baremetal-builtin test VCON_API_KEY=${{secrets.VCON_API_KEY}}
     - run: make -C tutorials/stm32/nucleo-f429zi-make-freertos-builtin test VCON_API_KEY=${{secrets.VCON_API_KEY}}
     - name: Cube
-      run: echo # nothing specific to install or do
+      run: sudo pip install yq
 #    - run: make -C test/cube PROJECTS=../../tutorials/stm32/nucleo-f429zi-cube-baremetal-builtin VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=2
 #    - run: make -C test/cube PROJECTS=../../tutorials/stm32/nucleo-f429zi-cube-freertos-builtin VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=2
     - run: make -C test/cube PROJECTS=../../tutorials/stm32/nucleo-f429zi-cube-freertos-lwip VCON_API_KEY=${{secrets.VCON_API_KEY}} DEVICE=2
