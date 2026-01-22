@@ -38,8 +38,10 @@ void mg_pfn_iobuf(char ch, void *param) {
 }
 
 size_t mg_vsnprintf(char *buf, size_t len, const char *fmt, va_list *ap) {
-  struct mg_iobuf io = {(uint8_t *) buf, len, 0, 0};
-  size_t n = mg_vxprintf(mg_putchar_iobuf_static, &io, fmt, ap);
+  struct mg_iobuf io = {0, 0, 0, 0};
+  size_t n;
+  io.buf = (uint8_t *) buf, io.size = len;
+  n = mg_vxprintf(mg_putchar_iobuf_static, &io, fmt, ap);
   if (n < len) buf[n] = '\0';
   return n;
 }
@@ -96,8 +98,8 @@ size_t mg_print_ip6(void (*out)(char, void *), void *arg, va_list *ap) {
 
 size_t mg_print_ip(void (*out)(char, void *), void *arg, va_list *ap) {
   struct mg_addr *addr = va_arg(*ap, struct mg_addr *);
-  if (addr->is_ip6) return print_ip6(out, arg, (uint16_t *) addr->ip);
-  return print_ip4(out, arg, (uint8_t *) &addr->ip);
+  if (addr->is_ip6) return print_ip6(out, arg, (uint16_t *) addr->addr.ip);
+  return print_ip4(out, arg, (uint8_t *) &addr->addr.ip);
 }
 
 size_t mg_print_ip_port(void (*out)(char, void *), void *arg, va_list *ap) {
@@ -105,11 +107,26 @@ size_t mg_print_ip_port(void (*out)(char, void *), void *arg, va_list *ap) {
   return mg_xprintf(out, arg, "%M:%hu", mg_print_ip, a, mg_ntohs(a->port));
 }
 
-size_t mg_print_mac(void (*out)(char, void *), void *arg, va_list *ap) {
-  uint8_t *p = va_arg(*ap, uint8_t *);
+static size_t print_mac(void (*out)(char, void *), void *arg, uint8_t *p) {
   return mg_xprintf(out, arg, "%02x:%02x:%02x:%02x:%02x:%02x", p[0], p[1], p[2],
                     p[3], p[4], p[5]);
 }
+
+size_t mg_print_mac(void (*out)(char, void *), void *arg, va_list *ap) {
+  uint8_t *p = va_arg(*ap, uint8_t *);
+  return print_mac(out, arg, p);
+}
+
+#if MG_ENABLE_TCPIP
+size_t mg_print_l2addr(void (*out)(char, void *), void *arg, va_list *ap) {
+  enum mg_l2type type = (enum mg_l2type) va_arg(*ap, int);
+  if (type == MG_TCPIP_L2_ETH) {
+    uint8_t *p = va_arg(*ap, uint8_t *);
+    return print_mac(out, arg, p);
+  }
+  return 0;
+}
+#endif
 
 static char mg_esc(int c, bool esc) {
   const char *p, *esc1 = "\b\f\n\r\t\\\"", *esc2 = "bfnrt\\\"";
@@ -145,7 +162,8 @@ static size_t bcpy(void (*out)(char, void *), void *arg, uint8_t *buf,
   for (i = 0; i < len; i += 3) {
     uint8_t c1 = buf[i], c2 = i + 1 < len ? buf[i + 1] : 0,
             c3 = i + 2 < len ? buf[i + 2] : 0;
-    char tmp[4] = {t[c1 >> 2], t[(c1 & 3) << 4 | (c2 >> 4)], '=', '='};
+    char tmp[4] = {0, 0, '=', '='};
+    tmp[0] = t[c1 >> 2], tmp[1] = t[(c1 & 3) << 4 | (c2 >> 4)];
     if (i + 1 < len) tmp[2] = t[(c2 & 15) << 2 | (c3 >> 6)];
     if (i + 2 < len) tmp[3] = t[c3 & 63];
     for (j = 0; j < sizeof(tmp) && tmp[j] != '\0'; j++) out(tmp[j], arg);

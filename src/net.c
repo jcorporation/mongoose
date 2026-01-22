@@ -31,14 +31,14 @@ size_t mg_printf(struct mg_connection *c, const char *fmt, ...) {
 static bool mg_atonl(struct mg_str str, struct mg_addr *addr) {
   uint32_t localhost = mg_htonl(0x7f000001);
   if (mg_strcasecmp(str, mg_str("localhost")) != 0) return false;
-  memcpy(addr->ip, &localhost, sizeof(uint32_t));
+  memcpy(addr->addr.ip, &localhost, sizeof(uint32_t));
   addr->is_ip6 = false;
   return true;
 }
 
 static bool mg_atone(struct mg_str str, struct mg_addr *addr) {
   if (str.len > 0) return false;
-  memset(addr->ip, 0, sizeof(addr->ip));
+  memset(addr->addr.ip, 0, sizeof(addr->addr.ip));
   addr->is_ip6 = false;
   return true;
 }
@@ -59,7 +59,7 @@ static bool mg_aton4(struct mg_str str, struct mg_addr *addr) {
     }
   }
   if (num_dots != 3 || str.buf[i - 1] == '.') return false;
-  memcpy(&addr->ip, data, sizeof(data));
+  memcpy(&addr->addr.ip, data, sizeof(data));
   addr->is_ip6 = false;
   return true;
 }
@@ -74,10 +74,10 @@ static bool mg_v4mapped(struct mg_str str, struct mg_addr *addr) {
   }
   // struct mg_str s = mg_str_n(&str.buf[7], str.len - 7);
   if (!mg_aton4(mg_str_n(&str.buf[7], str.len - 7), addr)) return false;
-  memcpy(&ipv4, addr->ip, sizeof(ipv4));
-  memset(addr->ip, 0, sizeof(addr->ip));
-  addr->ip[10] = addr->ip[11] = 255;
-  memcpy(&addr->ip[12], &ipv4, 4);
+  memcpy(&ipv4, addr->addr.ip, sizeof(ipv4));
+  memset(addr->addr.ip, 0, sizeof(addr->addr.ip));
+  addr->addr.ip[10] = addr->addr.ip[11] = 255;
+  memcpy(&addr->addr.ip[12], &ipv4, 4);
   addr->is_ip6 = true;
   return true;
 }
@@ -86,7 +86,7 @@ static bool mg_aton6(struct mg_str str, struct mg_addr *addr) {
   size_t i, j = 0, n = 0, dc = 42;
   addr->scope_id = 0;
   if (str.len > 2 && str.buf[0] == '[') str.buf++, str.len -= 2;
-  if (mg_v4mapped(str, addr)) return true;
+  if (mg_v4mapped(str, addr)) return true;  // sets addr->is_ip6
   for (i = 0; i < str.len; i++) {
     if ((str.buf[i] >= '0' && str.buf[i] <= '9') ||
         (str.buf[i] >= 'a' && str.buf[i] <= 'f') ||
@@ -95,8 +95,8 @@ static bool mg_aton6(struct mg_str str, struct mg_addr *addr) {
       if (i > j + 3) return false;
       // MG_DEBUG(("%lu %lu [%.*s]", i, j, (int) (i - j + 1), &str.buf[j]));
       mg_str_to_num(mg_str_n(&str.buf[j], i - j + 1), 16, &val, sizeof(val));
-      addr->ip[n] = (uint8_t) ((val >> 8) & 255);
-      addr->ip[n + 1] = (uint8_t) (val & 255);
+      addr->addr.ip[n] = (uint8_t) ((val >> 8) & 255);
+      addr->addr.ip[n + 1] = (uint8_t) (val & 255);
     } else if (str.buf[i] == ':') {
       j = i + 1;
       if (i > 0 && str.buf[i - 1] == ':') {
@@ -106,18 +106,23 @@ static bool mg_aton6(struct mg_str str, struct mg_addr *addr) {
         n += 2;
       }
       if (n > 14) return false;
-      addr->ip[n] = addr->ip[n + 1] = 0;  // For trailing ::
-    } else if (str.buf[i] == '%') {       // Scope ID, last in string
-      return mg_str_to_num(mg_str_n(&str.buf[i + 1], str.len - i - 1), 10,
-                           &addr->scope_id, sizeof(uint8_t));
+      addr->addr.ip[n] = addr->addr.ip[n + 1] = 0;  // For trailing ::
+    } else if (str.buf[i] == '%') {                 // Scope ID, last in string
+      if (mg_str_to_num(mg_str_n(&str.buf[i + 1], str.len - i - 1), 10,
+                        &addr->scope_id, sizeof(uint8_t))) {
+        addr->is_ip6 = true;
+        return true;
+      } else {
+        return false;
+      }
     } else {
       return false;
     }
   }
   if (n < 14 && dc == 42) return false;
   if (n < 14) {
-    memmove(&addr->ip[dc + (14 - n)], &addr->ip[dc], n - dc + 2);
-    memset(&addr->ip[dc], 0, 14 - n);
+    memmove(&addr->addr.ip[dc + (14 - n)], &addr->addr.ip[dc], n - dc + 2);
+    memset(&addr->addr.ip[dc], 0, 14 - n);
   }
 
   addr->is_ip6 = true;
@@ -300,4 +305,14 @@ void mg_mgr_init(struct mg_mgr *mgr) {
             : MG_TLS == MG_TLS_BUILTIN ? "builtin"
             : MG_TLS == MG_TLS_WOLFSSL ? "WolfSSL"
                                        : "custom"));
+}
+
+#if MG_ENABLE_TCPIP
+void mg_tcpip_mapip(struct mg_connection *, struct mg_addr *);
+#endif
+void mg_multicast_restore(struct mg_connection *c, uint8_t *from) {
+  memcpy(&c->rem, from, sizeof(c->rem));
+#if MG_ENABLE_TCPIP
+  mg_tcpip_mapip(c, &c->rem);
+#endif
 }

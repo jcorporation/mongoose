@@ -93,7 +93,7 @@ mip_tap_test: mip_tap_test.c mongoose.c mongoose.h packed_fs.c Makefile tls_mult
 
 mip_vc98: mip_test.c mongoose.c mongoose.h packed_fs.c Makefile
 	$(DOCKER) mdashnet/vc98 wine cl mip_test.c packed_fs.c $(VCFLAGS) $(DEFS) $(TFLAGS) /Fe$@.exe
-	$(DOCKER) mdashnet/vc98 wine $@.exe
+	$(DOCKER) -e WINEPREFIX=/tmp/wineprefix mdashnet/vc98 wine $@.exe
 
 packed_fs.c: Makefile data/ssi.h fuzz.c data/a.txt data/ca.pem certs/ca.crt certs/server.crt certs/server.key
 	$(CC) $(CFLAGS) pack.c -o pack
@@ -179,7 +179,6 @@ armhf: test
 s390: ASAN=
 s390: IPV6=0
 s390: CFLAGS += -Wno-stringop-overflow
-s390: DEFS += -DMG_ENABLE_CHACHA20=0
 s390: CC = $(DOCKER) mdashnet/s390 cc
 s390: RUN = $(DOCKER) --init mdashnet/s390
 s390: test
@@ -194,7 +193,7 @@ riscv: mongoose.h $(SRCS)
 
 vc98: Makefile mongoose.h $(SRCS)
 	$(DOCKER) mdashnet/vc98 wine cl $(SRCS) $(VCFLAGS) $(DEFS) $(TFLAGS) /Fe$@.exe
-	$(DOCKER) mdashnet/vc98 wine $@.exe
+	$(DOCKER) -e WINEPREFIX=/tmp/wineprefix mdashnet/vc98 wine $@.exe
 
 vc17: Makefile mongoose.h $(SRCS)
 	$(DOCKER) mdashnet/vc17 wine64 cl $(SRCS) $(VCFLAGS) $(DEFS) $(TFLAGS) /Fe$@.exe
@@ -230,7 +229,7 @@ mongoose.c: Makefile $(wildcard ../src/*.c) $(wildcard ../src/drivers/*.c)
 	cd .. && (export LC_ALL=C ; cat src/license.h; echo; echo '#include "mongoose.h"' ; (for F in src/*.c src/drivers/*.c ; do echo; echo '#ifdef MG_ENABLE_LINES'; echo "#line 1 \"$$F\""; echo '#endif'; cat $$F | sed -e 's,#include ".*,,'; done))> $@
 
 mongoose.h: $(HDRS) Makefile
-	cd .. && (cat src/license.h; echo; echo '#ifndef MONGOOSE_H'; echo '#define MONGOOSE_H'; echo; cat src/version.h ; echo; echo '#ifdef __cplusplus'; echo 'extern "C" {'; echo '#endif'; cat src/arch.h src/arch_*.h src/net_ft.h src/net_lwip.h src/net_rl.h src/config.h src/profile.h src/str.h src/queue.h src/fmt.h src/printf.h src/log.h src/timer.h src/fs.h src/util.h src/url.h src/iobuf.h src/base64.h src/md5.h src/sha1.h src/sha256.h src/event.h src/net.h src/http.h src/ssi.h src/tls.h src/tls_x25519.h src/tls_aes128.h src/tls_uecc.h src/tls_chacha20.h src/tls_rsa.h src/tls_mbed.h src/tls_openssl.h src/ws.h src/sntp.h src/mqtt.h src/dns.h src/json.h src/rpc.h src/ota.h src/flash.h src/wifi.h src/net_builtin.h src/drivers/*.h | sed -e '/keep/! s,#include ".*,,' -e 's,^#pragma once,,'; echo; echo '#ifdef __cplusplus'; echo '}'; echo '#endif'; echo '#endif  // MONGOOSE_H')> $@
+	cd .. && (cat src/license.h; echo; echo '#ifndef MONGOOSE_H'; echo '#define MONGOOSE_H'; echo; cat src/version.h ; echo; echo '#ifdef __cplusplus'; echo 'extern "C" {'; echo '#endif'; cat src/arch.h src/arch_*.h src/net_ft.h src/net_lwip.h src/net_rl.h src/config.h src/profile.h src/str.h src/queue.h src/fmt.h src/printf.h src/log.h src/timer.h src/fs.h src/util.h src/url.h src/iobuf.h src/base64.h src/md5.h src/sha1.h src/sha256.h src/event.h src/net.h src/http.h src/ssi.h src/tls.h src/tls_x25519.h src/tls_aes128.h src/tls_uecc.h src/tls_chacha20.h src/tls_rsa.h src/tls_mbed.h src/tls_openssl.h src/ws.h src/sntp.h src/mqtt.h src/dns.h src/json.h src/rpc.h src/ota.h src/flash.h src/wifi.h src/l2.h src/net_builtin.h src/drivers/*.h | sed -e '/keep/! s,#include ".*,,' -e 's,^#pragma once,,'; echo; echo '#ifdef __cplusplus'; echo '}'; echo '#endif'; echo '#endif  // MONGOOSE_H')> $@
 
 
 clean: clean_tutorials clean_tutorials_embedded
