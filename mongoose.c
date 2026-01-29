@@ -4671,6 +4671,10 @@ struct mg_connection *mg_connect_svc(struct mg_mgr *mgr, const char *url,
   struct mg_connection *c = NULL;
   if (url == NULL || url[0] == '\0') {
     MG_ERROR(("null url"));
+#if MG_ENABLE_TCPIP
+  } else if (mgr->ifp != NULL && mgr->ifp->state != MG_TCPIP_STATE_READY) {
+    MG_ERROR(("Network is down"));
+#endif
   } else if ((c = mg_alloc_conn(mgr)) == NULL) {
     MG_ERROR(("OOM"));
   } else {
@@ -4971,6 +4975,22 @@ struct dhcp6 {
   uint8_t options[30 + sizeof(((struct mg_tcpip_if *) 0)->dhcp_name)];
 };
 
+struct pseudoip {
+  uint32_t src;   // Source IP
+  uint32_t dst;   // Destination IP
+  uint8_t zero;
+  uint8_t proto;  // Upper level protocol
+  uint16_t len;   // Datagram length
+};
+
+struct pseudoip6 {
+  uint64_t src[2];   // Source IP
+  uint64_t dst[2];   // Destination IP
+  uint32_t plen;     // Payload length
+  uint8_t zero[3];
+  uint8_t next;      // Upper level protocol
+};
+
 #if defined(__DCC__)
 #pragma pack(0)
 #else
@@ -5036,6 +5056,7 @@ static void mkpay(struct pkt *pkt, void *p) {
       mg_str_n((char *) p, (size_t) (&pkt->pay.buf[pkt->pay.len] - (char *) p));
 }
 
+// NOTE(): DOES NOT handle reentries after odd length, use last
 static uint32_t csumup(uint32_t sum, const void *buf, size_t len) {
   size_t i;
   const uint8_t *p = (const uint8_t *) buf;
@@ -5053,7 +5074,71 @@ static uint16_t ipcsum(const void *buf, size_t len) {
   return csumfin(sum);
 }
 
+static bool ipcsum_ok(const void *d) {
+  struct ip *ip = (struct ip *) d;
+  return (ipcsum(d, (ip->ver & 0x0F) * 4) == 0);
+}
+
+static bool icmpcsum_ok(const void *d, size_t len) {
+  return (ipcsum(d, len) == 0);
+}
+
+static uint16_t pcsum(void *d, void *p, size_t plen) {
+  uint32_t sum;
+  struct ip *ip = (struct ip *) d;
+  struct pseudoip pip;
+  pip.src = ip->src;
+  pip.dst = ip->dst;
+  pip.zero = 0;
+  pip.proto = ip->proto;
+  pip.len = mg_htons((uint16_t) plen);
+  sum = csumup(0, &pip, sizeof(pip)); // even length
+  sum = csumup(sum, p, plen); // possibly odd length: last
+  return csumfin(sum);
+}
+
+static bool udpcsum_ok(void *d, void *u) {
+  struct udp *udp = (struct udp *) u;
+  if (udp->csum == 0) return true;
+  if (udp->csum == 0xFFFF) udp->csum = 0;
+  return (pcsum(d, u, (size_t) mg_ntohs(udp->len)) == 0);
+}
+
+static bool tcpcsum_ok(void *d, void *t) {
+  struct ip *ip = (struct ip *) d;
+  return (pcsum(d, t, (size_t)(mg_ntohs(ip->len) - (ip->ver & 0x0F) * 4)) == 0);
+}
+
 #if MG_ENABLE_IPV6
+static uint16_t p6csum(void *d, void *p, size_t plen) {
+  uint32_t sum;
+  struct ip6 *ip6 = (struct ip6 *) d;
+  struct pseudoip6 pip6;
+  pip6.src[0] = ip6->src[0], pip6.src[1] = ip6->src[1];
+  pip6.dst[0] = ip6->dst[0], pip6.dst[1] = ip6->dst[1];
+  pip6.zero[0] = 0, pip6.zero[1] = 0, pip6.zero[2] = 0;
+  pip6.plen = mg_htonl((uint32_t) plen);
+  pip6.next = ip6->next;
+  sum = csumup(0, &pip6, sizeof(pip6)); // even length
+  sum = csumup(sum, p, plen); // possibly odd length: last
+  return csumfin(sum);
+}
+
+static bool udp6csum_ok(void *d, void *u) {
+  struct udp *udp = (struct udp *) u;
+  if (udp->csum == 0) return false; // mandatory in IPv6
+  if (udp->csum == 0xFFFF) udp->csum = 0;
+  return (p6csum(d, u, (size_t) mg_ntohs(udp->len)) == 0);
+}
+static bool tcp6csum_ok(void *d, void *t) {
+  struct ip6 *ip6 = (struct ip6 *) d;
+  return (p6csum(d, t, (size_t) mg_ntohs(ip6->plen)) == 0);
+}
+static bool icmp6csum_ok(void *d, void *i) {
+  struct ip6 *ip6 = (struct ip6 *) d;
+  return (p6csum(d, i, (size_t) mg_ntohs(ip6->plen)) == 0);
+}
+
 static void ip6sn(uint64_t *addr, uint64_t *sn_addr) {
   // Build solicited-node multicast address from a given unicast IP
   // RFC-4291 2.7
@@ -5165,7 +5250,6 @@ static bool tx_udp(struct mg_tcpip_if *ifp, uint8_t *l2_dst,
   size_t l2_len;
   struct ip *ip = NULL;
   struct udp *udp;
-  uint32_t cs;
 #if MG_ENABLE_IPV6
   struct ip6 *ip6 = NULL;
   if (ip_dst->is_ip6) {
@@ -5185,21 +5269,15 @@ static bool tx_udp(struct mg_tcpip_if *ifp, uint8_t *l2_dst,
   udp->dport = ip_dst->port;
   udp->len = mg_htons((uint16_t) (sizeof(*udp) + len));
   udp->csum = 0;
-  cs = csumup(0, udp, sizeof(*udp));
-  cs = csumup(cs, buf, len);
+  memmove(udp + 1, buf, len);
 #if MG_ENABLE_IPV6
   if (ip_dst->is_ip6) {
-    cs = csumup(cs, &ip6->src, sizeof(ip6->src));
-    cs = csumup(cs, &ip6->dst, sizeof(ip6->dst));
+    udp->csum = p6csum(ip6, udp, sizeof(*udp) + len);
   } else
 #endif
   {
-    cs = csumup(cs, &ip->src, sizeof(ip->src));
-    cs = csumup(cs, &ip->dst, sizeof(ip->dst));
+    udp->csum = pcsum(ip, udp, sizeof(*udp) + len);
   }
-  cs += (uint32_t) (17 + sizeof(*udp) + len);
-  udp->csum = csumfin(cs);
-  memmove(udp + 1, buf, len);
   l2_len = mg_l2_footer(ifp->l2type, l2_len, l2p);
   return (driver_output(ifp, l2_len) == l2_len);
 }
@@ -5293,10 +5371,10 @@ static struct mg_connection *getpeer(struct mg_mgr *mgr, struct pkt *pkt,
     }
 #endif
     if (c->is_udp && pkt->udp && c->loc.port == pkt->udp->dport &&
-        (!c->loc.is_ip6 || pkt->ip6))
+        !(c->loc.is_ip6 ^ (pkt->ip6 != NULL))) // IP or IPv6 to same dest
       break;
     if (!c->is_udp && pkt->tcp && c->loc.port == pkt->tcp->dport &&
-        (!c->loc.is_ip6 || pkt->ip6) && lsn == (bool) c->is_listening &&
+        !(c->loc.is_ip6 ^ (pkt->ip6 != NULL)) && lsn == (bool) c->is_listening &&
         (lsn || c->rem.port == pkt->tcp->sport))
       break;
   }
@@ -5352,10 +5430,12 @@ static void rx_arp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
 
 static void rx_icmp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   uint8_t *l2p = (uint8_t *) ifp->tx.buf;
+  size_t plen = pkt->pay.len;
+  if (!icmpcsum_ok(pkt->icmp, sizeof(struct icmp) + plen)) return;
   if (pkt->icmp->type == 8 && pkt->ip != NULL && pkt->ip->dst == ifp->ip) {
     size_t l2_max_overhead = ifp->framesize - ifp->mtu;
     size_t hlen = sizeof(struct ip) + sizeof(struct icmp);
-    size_t room = ifp->tx.len - hlen - l2_max_overhead, plen = pkt->pay.len;
+    size_t room = ifp->tx.len - hlen - l2_max_overhead;
     uint8_t *l2addr;
     struct ip *ip;
     struct icmp *icmp;
@@ -5513,7 +5593,6 @@ static void tx_icmp6(struct mg_tcpip_if *ifp, uint8_t *l2_dst, uint64_t *ip_src,
   uint8_t *l2p = (uint8_t *) ifp->tx.buf;
   struct ip6 *ip6;
   struct icmp6 *icmp6;
-  uint32_t cs;
   ip6 = tx_ip6(ifp, l2_dst, 58, ip_src, ip_dst, sizeof(*icmp6) + len);
   icmp6 = (struct icmp6 *) (ip6 + 1);
   memset(icmp6, 0, sizeof(*icmp6));  // Set csum to 0
@@ -5521,12 +5600,7 @@ static void tx_icmp6(struct mg_tcpip_if *ifp, uint8_t *l2_dst, uint64_t *ip_src,
   icmp6->code = code;
   memcpy(icmp6 + 1, buf, len);  // Copy payload
   icmp6->csum = 0;              // RFC-4443 2.3, RFC-8200 8.1
-  cs = csumup(0, icmp6, sizeof(*icmp6));
-  cs = csumup(cs, buf, len);
-  cs = csumup(cs, ip_src, 16);
-  cs = csumup(cs, ip_dst, 16);
-  cs += (uint32_t) (58 + sizeof(*icmp6) + len);
-  icmp6->csum = csumfin(cs);
+  icmp6->csum = p6csum(ip6, icmp6, sizeof(*icmp6) + len);
   driver_output(
       ifp, mg_l2_footer(ifp->l2type, sizeof(*ip6) + sizeof(*icmp6) + len, l2p));
 }
@@ -5746,6 +5820,7 @@ static void rx_ndp_ra(struct mg_tcpip_if *ifp, struct pkt *pkt) {
 }
 
 static void rx_icmp6(struct mg_tcpip_if *ifp, struct pkt *pkt) {
+  if (!icmp6csum_ok(pkt->ip6, pkt->icmp6)) return;
   switch (pkt->icmp6->type) {
     case 128: {  // Echo Request, RFC-4443 4.1
       uint64_t target[2];
@@ -5847,12 +5922,14 @@ static bool rx_udp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   s = (struct connstate *) (c + 1);
   c->rem.port = pkt->udp->sport;
 #if MG_ENABLE_IPV6
-  if (c->loc.is_ip6) {
+  if (c->loc.is_ip6) { // matching of v4/v6 to dest is done bt getpeer()
+    if (!udp6csum_ok(pkt->ip6, pkt->udp)) return false;
     c->rem.addr.ip6[0] = pkt->ip6->src[0],
     c->rem.addr.ip6[1] = pkt->ip6->src[1], c->rem.is_ip6 = true;
   } else
 #endif
   {
+    if (!udpcsum_ok(pkt->ip, pkt->udp)) return false;
     c->rem.addr.ip4 = pkt->ip->src;
   }
   if ((l2addr = get_return_l2addr(ifp, &c->rem, true, pkt)) == NULL)
@@ -5878,68 +5955,57 @@ static size_t tx_tcp(struct mg_tcpip_if *ifp, uint8_t *l2_dst,
   uint8_t *l2p = (uint8_t *) ifp->tx.buf;
   struct ip *ip = NULL;
   struct tcp *tcp;
-  uint16_t opts[4 / 2], mss;
+  uint16_t opts[4 / 2];
+  size_t hlen = sizeof(*tcp);
 #if MG_ENABLE_IPV6
   struct ip6 *ip6 = NULL;
-  mss = (uint16_t) (ifp->mtu - 60);  // RFC-9293 3.7.1; RFC-6691 2
-#else
-  mss = (uint16_t) (ifp->mtu - 40);  // RFC-9293 3.7.1; RFC-6691 2
 #endif
+
+  // Handle any options first, here, to determine header size
   if (flags & TH_SYN) {          // Send MSS
+    uint16_t mss;
+#if MG_ENABLE_IPV6   // RFC-9293 3.7.1; RFC-6691 2
+    mss = (uint16_t) (ifp->mtu - 60);
+#else
+    mss = (uint16_t) (ifp->mtu - 40);
+#endif
     opts[0] = mg_htons(0x0204);  // RFC-9293 3.2
     opts[1] = mg_htons(mss);
-    buf = opts;
-    len = sizeof(opts);
+    hlen += sizeof(opts); // always whole number of 32-bit words
   }
+
 #if MG_ENABLE_IPV6
   if (ip_dst->is_ip6) {
-    ip6 = tx_ip6(ifp, l2_dst, 6, ip_src->addr.ip6, ip_dst->addr.ip6,
-                 sizeof(struct tcp) + len);
+    ip6 = tx_ip6(ifp, l2_dst, 6, ip_src->addr.ip6, ip_dst->addr.ip6, hlen + len);
     tcp = (struct tcp *) (ip6 + 1);
   } else
 #endif
   {
-    ip = tx_ip(ifp, l2_dst, 6, ip_src->addr.ip4, ip_dst->addr.ip4,
-               sizeof(struct tcp) + len);
+    ip = tx_ip(ifp, l2_dst, 6, ip_src->addr.ip4, ip_dst->addr.ip4, hlen + len);
     tcp = (struct tcp *) (ip + 1);
   }
   memset(tcp, 0, sizeof(*tcp));
-  if (buf != NULL && len) memmove(tcp + 1, buf, len);
+  memmove(tcp + 1, opts, hlen - sizeof(*tcp)); // copy opts if any
+  if (buf != NULL && len) memmove((uint8_t *)tcp + hlen, buf, len);
   tcp->sport = ip_src->port;
   tcp->dport = ip_dst->port;
   tcp->seq = seq;
   tcp->ack = ack;
   tcp->flags = flags;
   tcp->win = mg_htons(MG_TCPIP_WIN);
-  tcp->off = (uint8_t) (sizeof(*tcp) / 4 << 4);
-  if (flags & TH_SYN) tcp->off += (uint8_t) (sizeof(opts) / 4 << 4);
-  {
-    uint32_t cs = 0;
-    uint16_t n = (uint16_t) (sizeof(*tcp) + len);
-    cs = csumup(cs, tcp, n);
+  tcp->off = (uint8_t) (hlen / 4 << 4);
 #if MG_ENABLE_IPV6
-    if (ip_dst->is_ip6) {
-      cs = csumup(cs, &ip6->src, sizeof(ip6->src));
-      cs = csumup(cs, &ip6->dst, sizeof(ip6->dst));
-      cs += (uint32_t) (6 + n);
-    } else
+  if (ip_dst->is_ip6) {
+    tcp->csum = p6csum(ip6, tcp, hlen + len);
+  } else
 #endif
-    {
-      uint8_t pseudo[4];
-      pseudo[0] = 0;
-      pseudo[1] = ip->proto;
-      pseudo[2] = (uint8_t) (n >> 8);
-      pseudo[3] = (uint8_t) (n & 255);
-      cs = csumup(cs, &ip->src, sizeof(ip->src));
-      cs = csumup(cs, &ip->dst, sizeof(ip->dst));
-      cs = csumup(cs, pseudo, sizeof(pseudo));
-    }
-    tcp->csum = csumfin(cs);
+  {
+    tcp->csum = pcsum(ip, tcp, hlen + len);
   }
   MG_VERBOSE(("TCP %M -> %M fl %x len %u", mg_print_ip_port, ip_src,
               mg_print_ip_port, ip_dst, tcp->flags, len));
   return driver_output(
-      ifp, mg_l2_footer(ifp->l2type, PDIFF(ifp->tx.buf, tcp + 1) + len, l2p));
+      ifp, mg_l2_footer(ifp->l2type, PDIFF(l2p, tcp) + hlen + len, l2p));
 }
 
 static size_t tx_tcp_ctrlresp(struct mg_tcpip_if *ifp, struct pkt *pkt,
@@ -6273,6 +6339,10 @@ static void handle_opt(struct connstate *s, struct tcp *tcp, bool ip6) {
 static void rx_tcp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   struct mg_connection *c = getpeer(ifp->mgr, pkt, false);
   struct connstate *s = c == NULL ? NULL : (struct connstate *) (c + 1);
+#if MG_ENABLE_IPV6 // matching of v4/v6 to dest is done bt getpeer()
+  if (pkt->ip6 != NULL && !tcp6csum_ok(pkt->ip6, pkt->tcp)) return;
+#endif
+  if (pkt->ip != NULL && !tcpcsum_ok(pkt->ip, pkt->tcp)) return;
   pkt->tcp->flags &= TH_STDFLAGS;  // tolerate creative usage (ECN, ?)
   // Order is VERY important; RFC-9293 3.5.2
   // - check clients (Group 1) and established connections (Group 3)
@@ -6358,6 +6428,7 @@ static void rx_ip(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   if (len < (uint16_t) (ihl * 4) || len > pkt->pay.len) return;  // malformed
   pkt->pay.len = len;                      // strip padding
   mkpay(pkt, (uint32_t *) pkt->ip + ihl);  // account for opts
+  if (!ipcsum_ok(pkt->ip)) return;
   frag = mg_ntohs(pkt->ip->frag);
   if (frag & IP_MORE_FRAGS_MSK || frag & IP_FRAG_OFFSET_MSK) {
     struct mg_connection *c;
@@ -9154,7 +9225,7 @@ static void mg_pfn_iobuf_private(char ch, void *param, bool expand) {
   }
 }
 
-static void mg_putchar_iobuf_static(char ch, void *param) {
+void mg_pfn_iobuf_noresize(char ch, void *param) {
   mg_pfn_iobuf_private(ch, param, false);
 }
 
@@ -9166,7 +9237,7 @@ size_t mg_vsnprintf(char *buf, size_t len, const char *fmt, va_list *ap) {
   struct mg_iobuf io = {0, 0, 0, 0};
   size_t n;
   io.buf = (uint8_t *) buf, io.size = len;
-  n = mg_vxprintf(mg_putchar_iobuf_static, &io, fmt, ap);
+  n = mg_vxprintf(mg_pfn_iobuf_noresize, &io, fmt, ap);
   if (n < len) buf[n] = '\0';
   return n;
 }
@@ -13946,12 +14017,12 @@ static int mg_tls_verify_cert_san(const uint8_t *der, size_t dersz,
   }
   while (mg_der_next(&field, &name) > 0) {
     if (name.type == 0x87 && name.len == 4) {  // this is an IPv4 address
-      MG_DEBUG(("Found SAN, IP: %M", mg_print_ip4, name.value));
+      MG_VERBOSE(("Found SAN, IP: %M", mg_print_ip4, name.value));
       if (!server_ip->is_ip6 &&
           *((uint32_t *) name.value) == server_ip->addr.ip4)
         return 1;  // and matches the one we're connected to
     } else {       // this is a text SAN
-      MG_DEBUG(("Found SAN, (%u): %.*s", name.type, name.len, name.value));
+      MG_VERBOSE(("Found SAN, (%u): %.*s", name.type, name.len, name.value));
       if (mg_match(mg_str(server_name), mg_str_n((char *) name.value, name.len),
                    NULL))
         return 1;  // and matches the host name
@@ -13982,7 +14053,7 @@ static int mg_tls_verify_cert_signature(const struct mg_tls_cert *cert,
                             (unsigned) cert->tbshashsz, sig,
                             mg_uecc_secp256r1());
     } else if (issuer->pubkey.len == 96) {
-      MG_DEBUG(("ignore secp386 for now"));
+      MG_VERBOSE(("ignore secp386 for now"));
       return 1;
     } else {
       MG_ERROR(("unsupported public key length: %d", issuer->pubkey.len));
@@ -14012,7 +14083,7 @@ static int mg_tls_verify_cert_cn(struct mg_der_tlv *subj, const char *host) {
   struct mg_der_tlv v;
   int matched = 0;
   if (mg_der_find_oid(subj, (uint8_t *) "\x55\x04\x03", 3, &v) > 0) {
-    MG_DEBUG(("using CN: %.*s <-> %s", v.len, v.value, host));
+    MG_VERBOSE(("using CN: %.*s <-> %s", v.len, v.value, host));
     matched = mg_match(mg_str(host), mg_str_n((char *) v.value, v.len), NULL);
   }
   return matched;
@@ -14192,7 +14263,7 @@ static int mg_tls_recv_cert_verify(struct mg_connection *c) {
         mg_error(c, "failed to verify RSA certificate (certverify)");
         return -1;
       }
-      MG_DEBUG(("certificate verification successful (RSA)"));
+      MG_VERBOSE(("certificate verification successful (RSA)"));
     } else if (sigalg == 0x0403) {  // ecdsa_secp256r1_sha256
       // Extract certificate signature and verify it using pubkey and sighash
       uint8_t sig[64];
@@ -14221,7 +14292,7 @@ static int mg_tls_recv_cert_verify(struct mg_connection *c) {
         mg_error(c, "failed to verify EC certificate (certverify)");
         return -1;
       }
-      MG_DEBUG(("certificate verification successful (EC)"));
+      MG_VERBOSE(("certificate verification successful (EC)"));
     } else {
       // From
       // https://www.iana.org/assignments/tls-parameters/tls-parameters.xhtml:
@@ -14505,7 +14576,7 @@ static int mg_rsa_parse_key(const uint8_t *der, size_t dersz, struct mg_rsa_key 
   memset(key, 0, sizeof(*key));
 
   // Debug: show first few bytes
-  MG_DEBUG(
+  MG_VERBOSE(
       ("RSA key DER first 16 bytes: %02x %02x %02x %02x %02x %02x %02x %02x "
        "%02x %02x %02x %02x %02x %02x %02x %02x",
        der[0], der[1], der[2], der[3], der[4], der[5], der[6], der[7], der[8],
@@ -14527,7 +14598,7 @@ static int mg_rsa_parse_key(const uint8_t *der, size_t dersz, struct mg_rsa_key 
   if (seq_len > 0x7F) {
     // Long form length
     uint8_t len_bytes = seq_len & 0x7F;
-    MG_DEBUG(("Long form length: %d bytes", len_bytes));
+    MG_VERBOSE(("Long form length: %d bytes", len_bytes));
     if (end - p < len_bytes) {
       MG_ERROR(("Not enough bytes for long form length"));
       return -1;
@@ -14539,7 +14610,7 @@ static int mg_rsa_parse_key(const uint8_t *der, size_t dersz, struct mg_rsa_key 
     p += len_bytes;
   }
 
-  MG_DEBUG(
+  MG_VERBOSE(
       ("SEQUENCE length: %u, total DER size: %u", seq_len, (unsigned) dersz));
 
   if (end - p < (long) seq_len) {
@@ -14549,7 +14620,7 @@ static int mg_rsa_parse_key(const uint8_t *der, size_t dersz, struct mg_rsa_key 
   end = p + seq_len;  // Adjust end to sequence boundary
 
   // Parse version (should be 0)
-  MG_DEBUG(("Before version: offset=%d, bytes: %02x %02x %02x %02x",
+  MG_VERBOSE(("Before version: offset=%d, bytes: %02x %02x %02x %02x",
             (int) (p - der), p[0], p[1], p[2], p[3]));
   if (mg_rsa_parse_der_int(&p, end, &version) < 0) {
     MG_ERROR(("Failed to parse version"));
@@ -14560,20 +14631,20 @@ static int mg_rsa_parse_key(const uint8_t *der, size_t dersz, struct mg_rsa_key 
             (int) (p - der)));
 
   // Parse the 8 components: n, e, d, p, q, dP, dQ, qInv
-  MG_DEBUG(("Before n: offset=%d, bytes: %02x %02x %02x %02x %02x %02x",
+  MG_VERBOSE(("Before n: offset=%d, bytes: %02x %02x %02x %02x %02x %02x",
             (int) (p - der), p[0], p[1], p[2], p[3], p[4], p[5]));
   if (mg_rsa_parse_der_int(&p, end, &key->n) < 0) {
     MG_ERROR(("Failed to parse n (modulus)"));
     return -1;
   }
-  MG_DEBUG(("Parsed n: %d bytes, offset now=%d, consumed=%d bytes total",
+  MG_VERBOSE(("Parsed n: %d bytes, offset now=%d, consumed=%d bytes total",
             (int) key->n.len, (int) (p - der), (int) (p - der)));
-  MG_DEBUG(("  First 8 bytes of n: %02x %02x %02x %02x %02x %02x %02x %02x",
+  MG_VERBOSE(("  First 8 bytes of n: %02x %02x %02x %02x %02x %02x %02x %02x",
             (unsigned char) key->n.buf[0], (unsigned char) key->n.buf[1],
             (unsigned char) key->n.buf[2], (unsigned char) key->n.buf[3],
             (unsigned char) key->n.buf[4], (unsigned char) key->n.buf[5],
             (unsigned char) key->n.buf[6], (unsigned char) key->n.buf[7]));
-  MG_DEBUG(("  Next bytes after n: %02x %02x %02x %02x %02x %02x",
+  MG_VERBOSE(("  Next bytes after n: %02x %02x %02x %02x %02x %02x",
             p < end ? p[0] : 0xFF, p + 1 < end ? p[1] : 0xFF,
             p + 2 < end ? p[2] : 0xFF, p + 3 < end ? p[3] : 0xFF,
             p + 4 < end ? p[4] : 0xFF, p + 5 < end ? p[5] : 0xFF));
@@ -14611,7 +14682,7 @@ static int mg_rsa_parse_key(const uint8_t *der, size_t dersz, struct mg_rsa_key 
     return -1;
   }
 
-  MG_DEBUG(("Successfully parsed RSA key"));
+  MG_VERBOSE(("Successfully parsed RSA key"));
   return 0;
 }
 
