@@ -16841,6 +16841,7 @@ static EVP_PKEY *load_key(struct mg_str s) {
   return key;
 }
 
+#if 0
 static X509 *load_cert(struct mg_str s) {
   BIO *bio = BIO_new_mem_buf(s.buf, (int) (long) s.len);
   X509 *cert = bio == NULL ? NULL
@@ -16850,6 +16851,7 @@ static X509 *load_cert(struct mg_str s) {
   if (bio) BIO_free(bio);
   return cert;
 }
+#endif
 
 static long mg_bio_ctrl(BIO *b, int cmd, long larg, void *pargs) {
   long ret = 0;
@@ -16983,8 +16985,23 @@ void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
   }
 
   if (opts->cert.buf != NULL && opts->cert.buf[0] != '\0') {
-    X509 *cert = load_cert(opts->cert);
+    bio = BIO_new_mem_buf(opts->cert.buf, (int) (long) opts->cert.len);
+    X509 *cert = bio == NULL ? NULL
+               : MG_IS_DER(opts->cert.buf)
+                   ? d2i_X509_bio(bio, NULL)                    // DER
+                   : PEM_read_bio_X509(bio, NULL, NULL, NULL);  // PEM
+
     rc = cert == NULL ? 0 : SSL_use_certificate(tls->ssl, cert);
+    if (rc == 1 && !MG_IS_DER(opts->cert.buf)) {
+      SSL_clear_chain_certs(tls->ssl);
+      X509 *ca = X509_new();
+      for (;;) {
+        if (!PEM_read_bio_X509(bio, &ca, NULL, NULL)) break;
+        SSL_add0_chain_cert(tls->ssl, ca);
+      }
+      X509_free(ca);
+    }
+    if (bio) BIO_free(bio);
     X509_free(cert);
     if (cert == NULL || rc != 1) {
       mg_error(c, "CERT err %d", mg_tls_err(c, tls, rc));
