@@ -4109,49 +4109,64 @@ size_t mg_mqtt_next_prop(struct mg_mqtt_message *msg, struct mg_mqtt_prop *prop,
   uint8_t *i = (uint8_t *) msg->dgram.buf + msg->props_start + ofs;
   uint8_t *end = (uint8_t *) msg->dgram.buf + msg->dgram.len;
   size_t new_pos = ofs, len;
-  prop->id = i[0];
 
-  if (ofs >= msg->dgram.len || ofs >= msg->props_start + msg->props_size)
+  if (ofs >= msg->dgram.len || ofs >= msg->props_start + msg->props_size || (i + 1) >= end)
     return 0;
+
+  memset(prop, 0, sizeof(struct mg_mqtt_prop));
+  prop->id = i[0];
   i++, new_pos++;
 
   switch (mqtt_prop_type_by_id(prop->id)) {
     case MQTT_PROP_TYPE_STRING_PAIR:
+      if (i + 2 >= end) return 0;
       prop->key.len = (uint16_t) ((((uint16_t) i[0]) << 8) | i[1]);
       prop->key.buf = (char *) i + 2;
       i += 2 + prop->key.len;
+      if (i + 2 >= end) return 0;
       prop->val.len = (uint16_t) ((((uint16_t) i[0]) << 8) | i[1]);
       prop->val.buf = (char *) i + 2;
+      if (i + 2 + prop->val.len >= end) return 0;
       new_pos += 2 * sizeof(uint16_t) + prop->val.len + prop->key.len;
       break;
     case MQTT_PROP_TYPE_BYTE:
+      if (i + 1 >= end) return 0;
       prop->iv = (uint8_t) i[0];
       new_pos++;
       break;
     case MQTT_PROP_TYPE_SHORT:
+      if (i + 2 >= end) return 0;
       prop->iv = (uint16_t) ((((uint16_t) i[0]) << 8) | i[1]);
       new_pos += sizeof(uint16_t);
       break;
     case MQTT_PROP_TYPE_INT:
+      if (i + 4 >= end) return 0;
       prop->iv = ((uint32_t) i[0] << 24) | ((uint32_t) i[1] << 16) |
                  ((uint32_t) i[2] << 8) | i[3];
       new_pos += sizeof(uint32_t);
       break;
     case MQTT_PROP_TYPE_STRING:
+      if (i + 2 >= end) return 0;
       prop->val.len = (uint16_t) ((((uint16_t) i[0]) << 8) | i[1]);
       prop->val.buf = (char *) i + 2;
+      if (i + 2 + prop->val.len >= end) return 0;
       new_pos += 2 + prop->val.len;
       break;
     case MQTT_PROP_TYPE_BINARY_DATA:
+      if (i + 2 >= end) return 0;
       prop->val.len = (uint16_t) ((((uint16_t) i[0]) << 8) | i[1]);
       prop->val.buf = (char *) i + 2;
+      if (i + 2 + prop->val.len >= end) return 0;
       new_pos += 2 + prop->val.len;
       break;
     case MQTT_PROP_TYPE_VARIABLE_INT:
       len = decode_varint(i, (size_t) (end - i), (size_t *) &prop->iv);
-      new_pos = (!len) ? 0 : new_pos + len;
+      if (i + len >= end) return 0;
+      new_pos = (len == 0) ? 0 : new_pos + len;
       break;
-    default: new_pos = 0;
+    default:
+      new_pos = 0;
+      break;
   }
 
   return new_pos;
@@ -6339,7 +6354,7 @@ static void handle_opt(struct connstate *s, struct tcp *tcp, bool ip6) {
 static void rx_tcp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   struct mg_connection *c = getpeer(ifp->mgr, pkt, false);
   struct connstate *s = c == NULL ? NULL : (struct connstate *) (c + 1);
-#if MG_ENABLE_IPV6 // matching of v4/v6 to dest is done bt getpeer()
+#if MG_ENABLE_IPV6 // matching of v4/v6 to dest is done by getpeer()
   if (pkt->ip6 != NULL && !tcp6csum_ok(pkt->ip6, pkt->tcp)) return;
 #endif
   if (pkt->ip != NULL && !tcpcsum_ok(pkt->ip, pkt->tcp)) return;
@@ -10751,7 +10766,7 @@ static void accept_conn(struct mg_mgr *mgr, struct mg_connection *lsn) {
     setsockopts(c);
     c->is_accepted = 1;
     c->is_hexdumping = lsn->is_hexdumping;
-    c->loc = lsn->loc;
+    setlocaddr(fd, &c->loc); // set local addr to where the client connected to
     c->pfn = lsn->pfn;
     c->pfn_data = lsn->pfn_data;
     c->fn = lsn->fn;
@@ -13296,21 +13311,22 @@ static bool mg_tls_send_cert(struct mg_connection *c, bool is_client) {
   struct tls_data *tls = (struct tls_data *) c->tls;
   int send_ca = !is_client && tls->ca_der.len > 0;
   // DER certificate + CA (server optional)
-  size_t total_size = tls->cert_der.len + 5;
-  for (size_t i = 1; i < tls->chain_len; i++) {
+  size_t i, offset, total_size = tls->cert_der.len + 5;
+  uint8_t *cert;
+  bool res = false;
+  for (i = 1; i < tls->chain_len; i++) {
     total_size += tls->chain_der[i].len + 5;
   }
   if (send_ca) {
     total_size += tls->ca_der.len + 5;
   }
-  uint8_t *cert = (uint8_t *) mg_calloc(1, 13 + total_size);
-  bool res;
-  if (cert == NULL) return false;
+  cert = (uint8_t *) mg_calloc(1, 13 + total_size);
+  if (cert == NULL) return res;
   cert[0] = MG_TLS_CERTIFICATE;  // handshake header
   MG_STORE_BE24(cert + 1, total_size + 4);
   cert[4] = 0;                          // request context
   MG_STORE_BE24(cert + 5, total_size);  // 3 bytes: cert (s) length
-  size_t offset = 8;
+  offset = 8;
   MG_STORE_BE24(cert + offset, tls->cert_der.len);  // 3 bytes: first cert len
   offset += 3;
   // bytes 11+ are certificate in DER format
@@ -13318,7 +13334,7 @@ static bool mg_tls_send_cert(struct mg_connection *c, bool is_client) {
   offset += tls->cert_der.len;
   MG_STORE_BE16(cert + offset, 0);  // certificate extensions (none)
   offset += 2;
-  for (size_t i = 1; i < tls->chain_len; i++) {
+  for (i = 1; i < tls->chain_len; i++) {
     MG_STORE_BE24(cert + offset, tls->chain_der[i].len);
     offset += 3;
     memmove(cert + offset, tls->chain_der[i].buf, tls->chain_der[i].len);
@@ -13366,7 +13382,7 @@ static void finish_SHA256(const MG_UECC_HashContext *base,
 static void mg_tls_mgf1(uint8_t *mask, size_t mask_len, const uint8_t *seed,
                         size_t seed_len) {
   uint32_t counter = 0;
-  size_t generated = 0;
+  size_t chunk, chunk_len, generated = 0;
   while (generated < mask_len) {
     mg_sha256_ctx ctx;
     uint8_t digest[32];
@@ -13379,8 +13395,8 @@ static void mg_tls_mgf1(uint8_t *mask, size_t mask_len, const uint8_t *seed,
     mg_sha256_update(&ctx, seed, seed_len);
     mg_sha256_update(&ctx, ctr, sizeof(ctr));
     mg_sha256_final(digest, &ctx);
-    size_t chunk_len = mask_len - generated;
-    size_t chunk = (chunk_len < sizeof(digest) ? chunk_len : sizeof(digest));
+    chunk_len = mask_len - generated;
+    chunk = (chunk_len < sizeof(digest) ? chunk_len : sizeof(digest));
     memmove(mask + generated, digest, chunk);
     generated += chunk;
     counter++;
@@ -13405,10 +13421,7 @@ static unsigned int mg_tls_rsa_bits(const struct mg_str *n) {
 
 static bool mg_tls_pss_encode(const uint8_t *hash, size_t hashlen,
                               const struct mg_str *n, uint8_t *em) {
-  size_t emlen = n->len;
-  size_t saltlen = hashlen;
-  size_t dblen;
-  size_t pslen;
+  size_t emlen = n->len, saltlen = hashlen, dblen, pslen, i;
   uint8_t salt[64];   // Max salt size for any reasonable hash
   uint8_t m[136];     // 8 + max hash (64) + max salt (64) = 136
   uint8_t H[64];      // Max hash size
@@ -13449,7 +13462,7 @@ static bool mg_tls_pss_encode(const uint8_t *hash, size_t hashlen,
 
   // Generate mask and apply to DB
   mg_tls_mgf1(mask, dblen, H, hashlen);
-  for (size_t i = 0; i < dblen; i++) DB[i] ^= mask[i];
+  for (i = 0; i < dblen; i++) DB[i] ^= mask[i];
 
   {
     // PSS standard: emBits = modulus_bit_length - 1
@@ -13476,6 +13489,8 @@ static bool mg_tls_pss_encode(const uint8_t *hash, size_t hashlen,
 
 static bool mg_tls_rsa_sign(struct tls_data *tls, const uint8_t *em,
                             size_t emlen, uint8_t *sig) {
+  size_t nlen;
+  int crt_result;
 #if MG_TLS_RSA_USE_CRT
   // RSA CRT (Chinese Remainder Theorem) optimization:
   // s1 = em^dP mod p
@@ -13491,9 +13506,9 @@ static bool mg_tls_rsa_sign(struct tls_data *tls, const uint8_t *em,
 
   MG_VERBOSE(("Using RSA-CRT optimization"));
 
-  size_t nlen = tls->rsa.n.len;
+  nlen = tls->rsa.n.len;
 
-  int crt_result = mg_rsa_crt_sign(
+  crt_result = mg_rsa_crt_sign(
       em, emlen, (const uint8_t *) tls->rsa.dP.buf, tls->rsa.dP.len,
       (const uint8_t *) tls->rsa.dQ.buf, tls->rsa.dQ.len,
       (const uint8_t *) tls->rsa.p.buf, tls->rsa.p.len,
@@ -13511,11 +13526,12 @@ static bool mg_tls_rsa_sign(struct tls_data *tls, const uint8_t *em,
     return false;
   }
 #else
+  int ret;
   // Standard RSA: s = em^d mod n
   memset(sig, 0, tls->rsa.n.len);
-  int ret = mg_rsa_mod_pow((const uint8_t *) tls->rsa.n.buf, tls->rsa.n.len,
-                           (const uint8_t *) tls->rsa.d.buf, tls->rsa.d.len, em,
-                           emlen, sig, tls->rsa.n.len);
+  ret = mg_rsa_mod_pow((const uint8_t *) tls->rsa.n.buf, tls->rsa.n.len,
+                       (const uint8_t *) tls->rsa.d.buf, tls->rsa.d.len, em,
+                       emlen, sig, tls->rsa.n.len);
   if (ret == 0) {
     MG_VERBOSE(("RSA signature first 4 bytes: %02x %02x %02x %02x", sig[0],
                 sig[1], sig[2], sig[3]));
@@ -14026,7 +14042,7 @@ static int mg_tls_verify_cert_san(const uint8_t *der, size_t dersz,
       if (mg_match(mg_str(server_name), mg_str_n((char *) name.value, name.len),
                    NULL))
         return 1;  // and matches the host name
-    }  // TODO(): add IPv6 comparison, more items ?
+    }              // TODO(): add IPv6 comparison, more items ?
   }
   return -1;
 }
@@ -14268,6 +14284,7 @@ static int mg_tls_recv_cert_verify(struct mg_connection *c) {
       // Extract certificate signature and verify it using pubkey and sighash
       uint8_t sig[64];
       struct mg_der_tlv seq, r, s;
+      memset(sig, 0, 64);
       if (mg_der_to_tlv(sigbuf, siglen, &seq) < 0) {
         mg_error(c, "verification message is not an ASN.1 DER sequence");
         return -1;
@@ -14284,8 +14301,9 @@ static int mg_tls_recv_cert_verify(struct mg_connection *c) {
       if (r.len > 32) r.value = r.value + (r.len - 32), r.len = 32;
       if (s.len > 32) s.value = s.value + (s.len - 32), s.len = 32;
 
-      memmove(sig, r.value, r.len);
-      memmove(sig + 32, s.value, s.len);
+      // r or s may be shorter than 32 bytes, "right-justify" (network order)
+      memmove(sig + (32 - r.len), r.value, r.len);
+      memmove(sig + 32 + (32 - s.len), s.value, s.len);
 
       if (mg_uecc_verify(tls->pubkey, tls->sighash, sizeof(tls->sighash), sig,
                          mg_uecc_secp256r1()) != 1) {
@@ -14460,7 +14478,8 @@ void mg_tls_handshake(struct mg_connection *c) {
 
 static int mg_rsa_parse_der_int(const uint8_t **p, const uint8_t *end,
                                 struct mg_str *out) {
-  const uint8_t *start = *p;
+  const uint8_t *start = *p, *value_start, *value_end;
+  uint8_t i;
   uint32_t len;
 
   if (end - start < 2) {
@@ -14484,7 +14503,7 @@ static int mg_rsa_parse_der_int(const uint8_t **p, const uint8_t *end,
       return -1;
     }
     len = 0;
-    for (uint8_t i = 0; i < len_bytes; i++) {
+    for (i = 0; i < len_bytes; i++) {
       len = (len << 8) | (*p)[i];
     }
     *p += len_bytes;
@@ -14498,8 +14517,8 @@ static int mg_rsa_parse_der_int(const uint8_t **p, const uint8_t *end,
   }
 
   // The encoded length tells us how many bytes to consume from the stream
-  const uint8_t *value_start = *p;
-  const uint8_t *value_end = *p + len;
+  value_start = *p;
+  value_end = *p + len;
 
   // Skip leading zero byte if present (for positive numbers)
   // This doesn't change how many bytes we consume, just what we expose
@@ -14567,7 +14586,8 @@ static int mg_parse_ec_private_key(const uint8_t *der, size_t dersz,
 //   exponent2         INTEGER,  -- dQ = d mod (q-1)
 //   coefficient       INTEGER,  -- qInv = (inverse of q) mod p
 // }
-static int mg_rsa_parse_key(const uint8_t *der, size_t dersz, struct mg_rsa_key *key) {
+static int mg_rsa_parse_key(const uint8_t *der, size_t dersz,
+                            struct mg_rsa_key *key) {
   const uint8_t *p = der;
   const uint8_t *end = der + dersz;
   uint32_t seq_len;
@@ -14597,14 +14617,14 @@ static int mg_rsa_parse_key(const uint8_t *der, size_t dersz, struct mg_rsa_key 
 
   if (seq_len > 0x7F) {
     // Long form length
-    uint8_t len_bytes = seq_len & 0x7F;
+    uint8_t i, len_bytes = seq_len & 0x7F;
     MG_VERBOSE(("Long form length: %d bytes", len_bytes));
     if (end - p < len_bytes) {
       MG_ERROR(("Not enough bytes for long form length"));
       return -1;
     }
     seq_len = 0;
-    for (uint8_t i = 0; i < len_bytes; i++) {
+    for (i = 0; i < len_bytes; i++) {
       seq_len = (seq_len << 8) | p[i];
     }
     p += len_bytes;
@@ -14621,7 +14641,7 @@ static int mg_rsa_parse_key(const uint8_t *der, size_t dersz, struct mg_rsa_key 
 
   // Parse version (should be 0)
   MG_VERBOSE(("Before version: offset=%d, bytes: %02x %02x %02x %02x",
-            (int) (p - der), p[0], p[1], p[2], p[3]));
+              (int) (p - der), p[0], p[1], p[2], p[3]));
   if (mg_rsa_parse_der_int(&p, end, &version) < 0) {
     MG_ERROR(("Failed to parse version"));
     return -1;
@@ -14632,22 +14652,22 @@ static int mg_rsa_parse_key(const uint8_t *der, size_t dersz, struct mg_rsa_key 
 
   // Parse the 8 components: n, e, d, p, q, dP, dQ, qInv
   MG_VERBOSE(("Before n: offset=%d, bytes: %02x %02x %02x %02x %02x %02x",
-            (int) (p - der), p[0], p[1], p[2], p[3], p[4], p[5]));
+              (int) (p - der), p[0], p[1], p[2], p[3], p[4], p[5]));
   if (mg_rsa_parse_der_int(&p, end, &key->n) < 0) {
     MG_ERROR(("Failed to parse n (modulus)"));
     return -1;
   }
   MG_VERBOSE(("Parsed n: %d bytes, offset now=%d, consumed=%d bytes total",
-            (int) key->n.len, (int) (p - der), (int) (p - der)));
+              (int) key->n.len, (int) (p - der), (int) (p - der)));
   MG_VERBOSE(("  First 8 bytes of n: %02x %02x %02x %02x %02x %02x %02x %02x",
-            (unsigned char) key->n.buf[0], (unsigned char) key->n.buf[1],
-            (unsigned char) key->n.buf[2], (unsigned char) key->n.buf[3],
-            (unsigned char) key->n.buf[4], (unsigned char) key->n.buf[5],
-            (unsigned char) key->n.buf[6], (unsigned char) key->n.buf[7]));
+              (unsigned char) key->n.buf[0], (unsigned char) key->n.buf[1],
+              (unsigned char) key->n.buf[2], (unsigned char) key->n.buf[3],
+              (unsigned char) key->n.buf[4], (unsigned char) key->n.buf[5],
+              (unsigned char) key->n.buf[6], (unsigned char) key->n.buf[7]));
   MG_VERBOSE(("  Next bytes after n: %02x %02x %02x %02x %02x %02x",
-            p < end ? p[0] : 0xFF, p + 1 < end ? p[1] : 0xFF,
-            p + 2 < end ? p[2] : 0xFF, p + 3 < end ? p[3] : 0xFF,
-            p + 4 < end ? p[4] : 0xFF, p + 5 < end ? p[5] : 0xFF));
+              p < end ? p[0] : 0xFF, p + 1 < end ? p[1] : 0xFF,
+              p + 2 < end ? p[2] : 0xFF, p + 3 < end ? p[3] : 0xFF,
+              p + 4 < end ? p[4] : 0xFF, p + 5 < end ? p[5] : 0xFF));
 
   if (mg_rsa_parse_der_int(&p, end, &key->e) < 0) {
     MG_ERROR(("Failed to parse e (public exponent), bytes remaining: %d",
@@ -14806,8 +14826,11 @@ static int mg_parse_pem_certs(const struct mg_str pem, struct mg_str **ders) {
   size_t end_len = strlen(end_marker);
 
   while (p < end) {
-    const char *begin = NULL;
-    for (const char *s = p; s <= end - (int) begin_len; s++) {
+    const char *s, *begin = NULL, *finish = NULL;
+    struct mg_str cert_pem, cert_der, *new_certs;
+    int i;
+
+    for (s = p; s <= end - (int) begin_len; s++) {
       if (memcmp(s, begin_marker, begin_len) == 0) {
         begin = s;
         break;
@@ -14815,33 +14838,30 @@ static int mg_parse_pem_certs(const struct mg_str pem, struct mg_str **ders) {
     }
     if (begin == NULL) break;
 
-    const char *finish = NULL;
-    for (const char *s = begin + begin_len; s <= end - (int) end_len; s++) {
+    for (s = begin + begin_len; s <= end - (int) end_len; s++) {
       if (memcmp(s, end_marker, end_len) == 0) {
         finish = s + end_len;
         break;
       }
     }
     if (finish == NULL) {
-      for (int i = 0; i < count; i++) mg_free((void *) certs[i].buf);
+      for (i = 0; i < count; i++) mg_free((void *) certs[i].buf);
       mg_free(certs);
       return -1;
     }
 
-    struct mg_str cert_pem = mg_str_n(begin, (size_t) (finish - begin));
-    struct mg_str cert_der;
-
+    cert_pem = mg_str_n(begin, (size_t) (finish - begin));
     if (mg_parse_pem(cert_pem, mg_str_s("CERTIFICATE"), &cert_der) < 0) {
-      for (int i = 0; i < count; i++) mg_free((void *) certs[i].buf);
+      for (i = 0; i < count; i++) mg_free((void *) certs[i].buf);
       mg_free(certs);
       return -1;
     }
 
-    struct mg_str *new_certs =
-        (struct mg_str *) mg_calloc((size_t) count + 1, sizeof(struct mg_str));
+    new_certs =
+        (struct mg_str *) mg_calloc((size_t) count + 1, sizeof(*new_certs));
     if (new_certs == NULL) {
       mg_free((void *) cert_der.buf);
-      for (int i = 0; i < count; i++) mg_free((void *) certs[i].buf);
+      for (i = 0; i < count; i++) mg_free((void *) certs[i].buf);
       mg_free(certs);
       return -1;
     }
@@ -14902,22 +14922,25 @@ void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
   }
 
   // parse PEM or DER certificate
-  struct mg_str *all_certs = NULL;
-  int cert_count = mg_parse_pem_certs(opts->cert, &all_certs);
+  {
+    struct mg_str *all_certs = NULL;
+    int cert_count = mg_parse_pem_certs(opts->cert, &all_certs);
 
-  if (cert_count > 0) {
-    tls->cert_der.buf = all_certs[0].buf;
-    tls->cert_der.len = all_certs[0].len;
-    if (cert_count > 1) {
-      tls->chain_len = (size_t) cert_count;
-      tls->chain_der = all_certs;
+    if (cert_count > 0) {
+      tls->cert_der.buf = all_certs[0].buf;
+      tls->cert_der.len = all_certs[0].len;
+      if (cert_count > 1) {
+        tls->chain_len = (size_t) cert_count;
+        tls->chain_der = all_certs;
+      } else {
+        mg_free(all_certs);
+      }
     } else {
-      mg_free(all_certs);
-    }
-  } else {
-    if (mg_parse_pem(opts->cert, mg_str_s("CERTIFICATE"), &tls->cert_der) < 0) {
-      MG_ERROR(("Failed to load certificate"));
-      return;
+      if (mg_parse_pem(opts->cert, mg_str_s("CERTIFICATE"), &tls->cert_der) <
+          0) {
+        MG_ERROR(("Failed to load certificate"));
+        return;
+      }
     }
   }
 
@@ -14944,13 +14967,13 @@ void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
     memmove(tls->ec_key, key.buf + 7, 32);
     mg_free((void *) key.buf);
   } else if (mg_parse_pem(opts->key, mg_str_s("RSA PRIVATE KEY"), &key) == 0) {
+    struct mg_rsa_key rsa_key;
     // RSA private key found, store it for later use
     tls->rsa_key_der = key;
     MG_INFO(("Parsed RSA private key: %d bytes", (int) key.len));
 
     // parse and validate the key structure
     // we keep the DER buffer, rsa_key just points into it
-    struct mg_rsa_key rsa_key;
     if (mg_rsa_parse_key((const uint8_t *) key.buf, key.len, &rsa_key) < 0) {
       MG_ERROR(("Failed to parse RSA private key structure"));
       mg_free((void *) key.buf);
@@ -14993,10 +15016,11 @@ void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
 
 void mg_tls_free(struct mg_connection *c) {
   struct tls_data *tls = (struct tls_data *) c->tls;
+  size_t i;
   if (tls != NULL) {
     mg_iobuf_free(&tls->send);
     if (tls->chain_der != NULL) {
-      for (size_t i = 0; i < tls->chain_len; i++) {
+      for (i = 0; i < tls->chain_len; i++) {
         mg_free((void *) tls->chain_der[i].buf);
       }
       mg_free(tls->chain_der);
@@ -15020,7 +15044,7 @@ long mg_tls_send(struct mg_connection *c, const void *buf, size_t len) {
     if (!mg_tls_encrypt(c, (const uint8_t *) buf, len, MG_TLS_APP_DATA))
       return 0;  // returning 0 means an OOM condition (iobuf couldn't resize),
                  // yet this is so far recoverable, let the caller decide
-  }  // else, resend outstanding encrypted data in tls->send
+  }              // else, resend outstanding encrypted data in tls->send
   while (tls->send.len > 0 &&
          (n = mg_io_send(c, tls->send.buf, tls->send.len)) > 0) {
     mg_iobuf_del(&tls->send, 0, (size_t) n);
@@ -15039,25 +15063,21 @@ long mg_tls_recv(struct mg_connection *c, void *buf, size_t len) {
   unsigned char *recv_buf;
   size_t minlen;
 
-  r = mg_tls_recv_record(c);
-  if (r < 0) {
-    return r;
-  }
-  recv_buf = &c->rtls.buf[tls->recv_offset];
-
-  if (tls->content_type != MG_TLS_APP_DATA) {
+  for (;;) {
+    r = mg_tls_recv_record(c);
+    if (r < 0) return r;
+    if (tls->content_type == MG_TLS_APP_DATA) break;
     tls->recv_len = 0;
     mg_tls_drop_record(c);
-    return MG_IO_WAIT;
   }
+
   if (buf == NULL || len == 0) return 0L;
+  recv_buf = &c->rtls.buf[tls->recv_offset];
   minlen = len < tls->recv_len ? len : tls->recv_len;
   memmove(buf, recv_buf, minlen);
   tls->recv_offset += minlen;
   tls->recv_len -= minlen;
-  if (tls->recv_len == 0) {
-    mg_tls_drop_record(c);
-  }
+  if (tls->recv_len == 0) mg_tls_drop_record(c);
   return (long) minlen;
 }
 
@@ -16789,6 +16809,7 @@ static int mg_tls_err(struct mg_connection *c, struct mg_tls *tls, int res) {
   return err;
 }
 
+#if MG_TLS != MG_TLS_WOLFSSL
 static STACK_OF(X509_INFO) * load_ca_certs(struct mg_str ca) {
   BIO *bio = BIO_new_mem_buf(ca.buf, (int) ca.len);
   STACK_OF(X509_INFO) *certs =
@@ -16808,6 +16829,7 @@ static bool add_ca_certs(SSL_CTX *ctx, STACK_OF(X509_INFO) * certs) {
   }
   return true;
 }
+#endif
 
 static EVP_PKEY *load_key(struct mg_str s) {
   BIO *bio = BIO_new_mem_buf(s.buf, (int) (long) s.len);
@@ -16932,9 +16954,21 @@ void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
     SSL_set_verify(tls->ssl, SSL_VERIFY_NONE, NULL);
   }
 #endif
+
   if (opts->ca.buf != NULL && opts->ca.buf[0] != '\0') {
     SSL_set_verify(tls->ssl, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT,
                    NULL);
+#if MG_TLS == MG_TLS_WOLFSSL
+    extern int wolfSSL_CTX_load_verify_buffer(SSL_CTX *, const unsigned char *,
+                                              long, int);
+    rc = wolfSSL_CTX_load_verify_buffer(tls->ctx,
+                                        (const unsigned char *) opts->ca.buf,
+                                        (long) opts->ca.len, SSL_FILETYPE_PEM);
+    if (rc != 1) {
+      mg_error(c, "CA err");
+      goto fail;
+    }
+#else
     STACK_OF(X509_INFO) *certs = load_ca_certs(opts->ca);
     rc = add_ca_certs(tls->ctx, certs);
     sk_X509_INFO_pop_free(certs, X509_INFO_free);
@@ -16942,7 +16976,9 @@ void mg_tls_init(struct mg_connection *c, const struct mg_tls_opts *opts) {
       mg_error(c, "CA err");
       goto fail;
     }
+#endif
   }
+
   if (opts->cert.buf != NULL && opts->cert.buf[0] != '\0') {
     X509 *cert = load_cert(opts->cert);
     rc = cert == NULL ? 0 : SSL_use_certificate(tls->ssl, cert);
@@ -24727,7 +24763,7 @@ bool __attribute__((weak)) mg_wifi_ap_stop(void) {
 
 
 enum {                  // ID1  ID2
-  MG_PHY_KSZ8x = 0x22,  // 0022 1561 - KSZ8081RNB
+  MG_PHY_KSZ8x = 0x22,  // 0022 156x - KSZ8081RNB, KSZ8091RNB
   MG_PHY_DP83x = 0x2000,
   MG_PHY_DP83867 = 0xa231,  // 2000 a231 - TI DP83867I
   MG_PHY_DP83825 = 0xa140,  // 2000 a140 - TI DP83825I
@@ -25586,7 +25622,7 @@ static bool mg_tcpip_driver_ra_init(struct mg_tcpip_if *ifp) {
 
   MG_DEBUG(("PHY addr: %d, smispin: %d", d->phy_addr, s_smispin));
   struct mg_phy phy = {raeth_read_phy, raeth_write_phy};
-  mg_phy_init(&phy, d->phy_addr, 0);  // MAC clocks PHY
+  mg_phy_init(&phy, d->phy_addr, MG_PHY_CLOCKS_MAC);
 
   // Select RMII mode,
   ETHERC->ECMR = MG_BIT(2) | MG_BIT(1);  // 100M, Full-duplex, CRC

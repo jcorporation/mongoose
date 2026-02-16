@@ -5,7 +5,7 @@
 [![Code Coverage](https://codecov.io/gh/cesanta/mongoose/branch/master/graph/badge.svg)](https://codecov.io/gh/cesanta/mongoose)
 [![Fuzzing Status](https://oss-fuzz-build-logs.storage.googleapis.com/badges/mongoose.svg)](https://issues.oss-fuzz.com/issues?sort=-opened&can=1&q=proj:mongoose)
 
-Mongoose is a network library for C/C++.  It provides event-driven non-blocking
+<img src="https://mongoose.ws/images/logo.svg" width="48" height="48" align="left" style="float:left;" /> Mongoose is a network library for C/C++.  It provides event-driven non-blocking
 APIs for TCP, UDP, HTTP, WebSocket, MQTT, and other protocols.  It is designed
 for connecting devices and bringing them online. On the market since 2004, used
 by vast number of open source and commercial products - it even runs on the
@@ -198,6 +198,10 @@ We take security seriously:
   have specific security requirements and run independent security audits,
   of which we get notified and in case of any issue, act similar to (3).
 
+## How to report security vulnerabilities
+
+Please send an email to support at mongoose dot ws, with the full information.
+Do NOT create a github issue.
 
 ## Articles
 
@@ -215,6 +219,7 @@ Technical guides and deep dives into embedded web servers, WebUI integration and
 - [STM32 OTA Firmware Update](https://mongoose.ws/articles/stm32-ota-firmware-update/)
 - [RP2350 OTA Firmware Update](https://mongoose.ws/articles/rp2350-ota-firmware-update/)
 - [STM32 Ethernet and caches](https://mongoose.ws/articles/stm32-ethernet-and-cache/)
+- [NXP RW612 OTA Firmware Update](https://mongoose.ws/articles/rw612-ota-firmware-update/)
 
 
 ## Contributions
