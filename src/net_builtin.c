@@ -152,19 +152,19 @@ struct dhcp6 {
 };
 
 struct pseudoip {
-  uint32_t src;   // Source IP
-  uint32_t dst;   // Destination IP
+  uint32_t src;  // Source IP
+  uint32_t dst;  // Destination IP
   uint8_t zero;
   uint8_t proto;  // Upper level protocol
   uint16_t len;   // Datagram length
 };
 
 struct pseudoip6 {
-  uint64_t src[2];   // Source IP
-  uint64_t dst[2];   // Destination IP
-  uint32_t plen;     // Payload length
+  uint64_t src[2];  // Source IP
+  uint64_t dst[2];  // Destination IP
+  uint32_t plen;    // Payload length
   uint8_t zero[3];
-  uint8_t next;      // Upper level protocol
+  uint8_t next;  // Upper level protocol
 };
 
 #if defined(__DCC__)
@@ -191,14 +191,13 @@ struct pkt {
 };
 
 // L2 API
-void mg_l2_init(enum mg_l2type type, uint8_t *addr, uint16_t *mtu,
-                uint16_t *framesize);
-uint8_t *mg_l2_header(enum mg_l2type type, enum mg_l2proto proto, uint8_t *src,
-                      uint8_t *dst, uint8_t *frame);
-size_t mg_l2_footer(enum mg_l2type type, size_t len, uint8_t *frame);
+void mg_l2_init(struct mg_tcpip_if *ifp);
+uint8_t *mg_l2_header(struct mg_tcpip_if *ifp, enum mg_l2proto proto,
+                      uint8_t *src, uint8_t *dst, uint8_t *frame);
+size_t mg_l2_trailer(struct mg_tcpip_if *ifp, size_t len, uint8_t *cur);
 bool mg_l2_rx(struct mg_tcpip_if *ifp, enum mg_l2proto *proto,
               struct mg_str *pay, struct mg_str *raw);
-uint8_t *mg_l2_getaddr(enum mg_l2type type, uint8_t *frame);
+uint8_t *mg_l2_getaddr(struct mg_tcpip_if *ifp, uint8_t *frame);
 uint8_t *mg_l2_mapip(enum mg_l2type type, enum mg_l2addrtype addrtype,
                      struct mg_addr *ip);
 #if MG_ENABLE_IPV6
@@ -208,6 +207,7 @@ bool mg_l2_ip6get(enum mg_l2type type, uint8_t *addr, uint8_t *opts,
                   uint8_t len);
 uint8_t mg_l2_ip6put(enum mg_l2type type, uint8_t *addr, uint8_t *opts);
 #endif
+bool mg_l2_poll(struct mg_tcpip_if *ifp, bool expired_1000ms);
 
 static void mg_tcpip_call(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
 #if MG_ENABLE_PROFILE
@@ -262,14 +262,17 @@ static bool icmpcsum_ok(const void *d, size_t len) {
 static uint16_t pcsum(void *d, void *p, size_t plen) {
   uint32_t sum;
   struct ip *ip = (struct ip *) d;
-  struct pseudoip pip;
+#if defined(__DCC__)
+  volatile /* Makes PPC & Diab4.3 happy */
+#endif
+      struct pseudoip pip;
   pip.src = ip->src;
   pip.dst = ip->dst;
   pip.zero = 0;
   pip.proto = ip->proto;
   pip.len = mg_htons((uint16_t) plen);
-  sum = csumup(0, &pip, sizeof(pip)); // even length
-  sum = csumup(sum, p, plen); // possibly odd length: last
+  sum = csumup(0, &pip, sizeof(pip));  // even length
+  sum = csumup(sum, p, plen);          // possibly odd length: last
   return csumfin(sum);
 }
 
@@ -282,27 +285,31 @@ static bool udpcsum_ok(void *d, void *u) {
 
 static bool tcpcsum_ok(void *d, void *t) {
   struct ip *ip = (struct ip *) d;
-  return (pcsum(d, t, (size_t)(mg_ntohs(ip->len) - (ip->ver & 0x0F) * 4)) == 0);
+  return (pcsum(d, t, (size_t) (mg_ntohs(ip->len) - (ip->ver & 0x0F) * 4)) ==
+          0);
 }
 
 #if MG_ENABLE_IPV6
 static uint16_t p6csum(void *d, void *p, size_t plen) {
   uint32_t sum;
   struct ip6 *ip6 = (struct ip6 *) d;
-  struct pseudoip6 pip6;
+#if defined(__DCC__)
+  volatile /* Makes PPC & Diab4.3 happy */
+#endif
+      struct pseudoip6 pip6;
   pip6.src[0] = ip6->src[0], pip6.src[1] = ip6->src[1];
   pip6.dst[0] = ip6->dst[0], pip6.dst[1] = ip6->dst[1];
   pip6.zero[0] = 0, pip6.zero[1] = 0, pip6.zero[2] = 0;
   pip6.plen = mg_htonl((uint32_t) plen);
   pip6.next = ip6->next;
-  sum = csumup(0, &pip6, sizeof(pip6)); // even length
-  sum = csumup(sum, p, plen); // possibly odd length: last
+  sum = csumup(0, &pip6, sizeof(pip6));  // even length
+  sum = csumup(sum, p, plen);            // possibly odd length: last
   return csumfin(sum);
 }
 
 static bool udp6csum_ok(void *d, void *u) {
   struct udp *udp = (struct udp *) u;
-  if (udp->csum == 0) return false; // mandatory in IPv6
+  if (udp->csum == 0) return false;  // mandatory in IPv6
   if (udp->csum == 0xFFFF) udp->csum = 0;
   return (p6csum(d, u, (size_t) mg_ntohs(udp->len)) == 0);
 }
@@ -330,15 +337,9 @@ static void ip6sn(uint64_t *addr, uint64_t *sn_addr) {
 }
 
 static const struct mg_addr ip6_allrouters = {
-    .addr = {.ip = {0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02}},
-    .port = 0,
-    .scope_id = 0,
-    .is_ip6 = true};
+    {{0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02}}, 0, 0, true};
 static const struct mg_addr ip6_allnodes = {
-    .addr = {.ip = {0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01}},
-    .port = 0,
-    .scope_id = 0,
-    .is_ip6 = true};
+    {{0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01}}, 0, 0, true};
 
 #define MG_IP6MATCH(a, b) (a[0] == b[0] && a[1] == b[1])
 #endif
@@ -367,7 +368,7 @@ static size_t driver_output(struct mg_tcpip_if *ifp, size_t len) {
 void mg_tcpip_arp_request(struct mg_tcpip_if *ifp, uint32_t ip, uint8_t *mac) {
   uint8_t *l2p = (uint8_t *) ifp->tx.buf;
   struct arp *arp = (struct arp *) mg_l2_header(
-      ifp->l2type, MG_TCPIP_L2PROTO_ARP, ifp->mac,
+      ifp, MG_TCPIP_L2PROTO_ARP, ifp->mac,
       mg_l2_mapip(ifp->l2type, MG_TCPIP_L2ADDR_BCAST, NULL), l2p);
   memset(arp, 0, sizeof(*arp));
   arp->fmt = mg_htons(1), arp->pro = mg_htons(0x800), arp->hlen = 6,
@@ -375,17 +376,21 @@ void mg_tcpip_arp_request(struct mg_tcpip_if *ifp, uint32_t ip, uint8_t *mac) {
   arp->op = mg_htons(1), arp->tpa = ip, arp->spa = ifp->ip;
   memcpy(arp->sha, ifp->mac, sizeof(arp->sha));
   if (mac != NULL) memcpy(arp->tha, mac, sizeof(arp->tha));
-  driver_output(ifp, mg_l2_footer(ifp->l2type, PDIFF(l2p, arp + 1), l2p));
+  driver_output(ifp, mg_l2_trailer(ifp, sizeof(*arp), (uint8_t *) (arp + 1)));
 }
 
 static void onstatechange(struct mg_tcpip_if *ifp) {
+  if (ifp->state == MG_TCPIP_STATE_IP &&
+      (ifp->l2type == MG_TCPIP_L2_PPP || ifp->l2type == MG_TCPIP_L2_PPPoE))
+    ifp->state = MG_TCPIP_STATE_READY;
   if (ifp->state == MG_TCPIP_STATE_READY) {
     MG_INFO(("READY, IP: %M", mg_print_ip4, &ifp->ip));
     MG_INFO(("       GW: %M", mg_print_ip4, &ifp->gw));
-    if (ifp->l2type == MG_TCPIP_L2_ETH)  // TODO(): print other l2
+    if (ifp->l2type == MG_TCPIP_L2_ETH ||
+        ifp->l2type == MG_TCPIP_L2_PPPoE)  // TODO(): print other l2
       MG_INFO(("      MAC: %M", mg_print_mac, ifp->mac));
   } else if (ifp->state == MG_TCPIP_STATE_IP) {
-    if (ifp->gw != 0)
+    if (ifp->gw != 0 && ifp->l2type == MG_TCPIP_L2_ETH)
       mg_tcpip_arp_request(ifp, ifp->gw, NULL);  // unsolicited GW ARP request
   } else if (ifp->state == MG_TCPIP_STATE_UP) {
     srand((unsigned int) mg_millis());
@@ -399,7 +404,7 @@ static struct ip *tx_ip(struct mg_tcpip_if *ifp, uint8_t *l2_dst, uint8_t proto,
                         uint32_t ip_src, uint32_t ip_dst, size_t plen) {
   // ifp->tx.buf is 8-bit aligned, keep other headers as pointers, see pkt
   uint8_t *l2p = (uint8_t *) ifp->tx.buf;
-  struct ip *ip = (struct ip *) mg_l2_header(ifp->l2type, MG_TCPIP_L2PROTO_IPV4,
+  struct ip *ip = (struct ip *) mg_l2_header(ifp, MG_TCPIP_L2PROTO_IPV4,
                                              ifp->mac, l2_dst, l2p);
   memset(ip, 0, sizeof(*ip));
   ip->ver = 0x45;               // Version 4, header length 5 words
@@ -422,7 +427,7 @@ static struct ip6 *tx_ip6(struct mg_tcpip_if *ifp, uint8_t *l2_dst,
 static bool tx_udp(struct mg_tcpip_if *ifp, uint8_t *l2_dst,
                    struct mg_addr *ip_src, struct mg_addr *ip_dst,
                    const void *buf, size_t len) {
-  uint8_t *l2p = (uint8_t *) ifp->tx.buf;
+  uint8_t *l3p;
   size_t l2_len;
   struct ip *ip = NULL;
   struct udp *udp;
@@ -433,6 +438,7 @@ static bool tx_udp(struct mg_tcpip_if *ifp, uint8_t *l2_dst,
                  len + sizeof(struct udp));
     udp = (struct udp *) (ip6 + 1);
     l2_len = sizeof(*ip6) + sizeof(*udp) + len;
+    l3p = (uint8_t *) ip6;
   } else
 #endif
   {
@@ -440,6 +446,7 @@ static bool tx_udp(struct mg_tcpip_if *ifp, uint8_t *l2_dst,
                len + sizeof(struct udp));
     udp = (struct udp *) (ip + 1);
     l2_len = sizeof(*ip) + sizeof(*udp) + len;
+    l3p = (uint8_t *) ip;
   }
   udp->sport = ip_src->port;
   udp->dport = ip_dst->port;
@@ -454,7 +461,7 @@ static bool tx_udp(struct mg_tcpip_if *ifp, uint8_t *l2_dst,
   {
     udp->csum = pcsum(ip, udp, sizeof(*udp) + len);
   }
-  l2_len = mg_l2_footer(ifp->l2type, l2_len, l2p);
+  l2_len = mg_l2_trailer(ifp, l2_len, l3p + l2_len);
   return (driver_output(ifp, l2_len) == l2_len);
 }
 
@@ -547,11 +554,16 @@ static struct mg_connection *getpeer(struct mg_mgr *mgr, struct pkt *pkt,
     }
 #endif
     if (c->is_udp && pkt->udp && c->loc.port == pkt->udp->dport &&
-        !(c->loc.is_ip6 ^ (pkt->ip6 != NULL))) // IP or IPv6 to same dest
+        !(c->loc.is_ip6 ^ (pkt->ip6 != NULL)))  // IP or IPv6 to same dest
       break;
     if (!c->is_udp && pkt->tcp && c->loc.port == pkt->tcp->dport &&
-        !(c->loc.is_ip6 ^ (pkt->ip6 != NULL)) && lsn == (bool) c->is_listening &&
-        (lsn || c->rem.port == pkt->tcp->sport))
+        ((lsn && c->is_listening && !(c->loc.is_ip6 ^ (pkt->ip6 != NULL))) ||
+         (!lsn && !c->is_listening && c->rem.port == pkt->tcp->sport &&
+          ((!c->loc.is_ip6 && c->rem.addr.ip4 == pkt->ip->src)
+#if MG_ENABLE_IPV6
+           || (c->loc.is_ip6 && MG_IP6MATCH(c->rem.addr.ip6, pkt->ip6->src))
+#endif
+               )))) // validate addr for established (not listening) conns
       break;
   }
   return c;
@@ -567,9 +579,8 @@ static void rx_arp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
     // ARP request. Make a response, then send
     // MG_VERBOSE(("ARP req from %M", mg_print_ip4, &pkt->arp->spa));
     uint8_t *l2p = (uint8_t *) ifp->tx.buf;
-    struct arp *arp =
-        (struct arp *) mg_l2_header(ifp->l2type, MG_TCPIP_L2PROTO_ARP, ifp->mac,
-                                    mg_l2_getaddr(ifp->l2type, pkt->l2), l2p);
+    struct arp *arp = (struct arp *) mg_l2_header(
+        ifp, MG_TCPIP_L2PROTO_ARP, ifp->mac, mg_l2_getaddr(ifp, pkt->l2), l2p);
     *arp = *pkt->arp;
     arp->op = mg_htons(2);
     memcpy(arp->tha, pkt->arp->sha, sizeof(pkt->arp->tha));
@@ -578,7 +589,7 @@ static void rx_arp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
     arp->spa = ifp->ip;
     MG_DEBUG(("ARP: tell %M we're %M", mg_print_ip4, &arp->tpa, mg_print_mac,
               ifp->mac));
-    driver_output(ifp, mg_l2_footer(ifp->l2type, PDIFF(l2p, arp + 1), l2p));
+    driver_output(ifp, mg_l2_trailer(ifp, sizeof(*arp), (uint8_t *) (arp + 1)));
   } else if (pkt->arp->op == mg_htons(2)) {
     if (memcmp(pkt->arp->tha, ifp->mac, sizeof(pkt->arp->tha)) != 0) return;
     // MG_VERBOSE(("ARP resp from %M", mg_print_ip4, &pkt->arp->spa));
@@ -605,7 +616,6 @@ static void rx_arp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
 }
 
 static void rx_icmp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
-  uint8_t *l2p = (uint8_t *) ifp->tx.buf;
   size_t plen = pkt->pay.len;
   if (!icmpcsum_ok(pkt->icmp, sizeof(struct icmp) + plen)) return;
   if (pkt->icmp->type == 8 && pkt->ip != NULL && pkt->ip->dst == ifp->ip) {
@@ -626,7 +636,8 @@ static void rx_icmp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
     memset(icmp, 0, sizeof(*icmp));        // Set csum, type, code to 0
     memcpy(icmp + 1, pkt->pay.buf, plen);  // Copy RX payload to TX
     icmp->csum = ipcsum(icmp, sizeof(*icmp) + plen);
-    driver_output(ifp, mg_l2_footer(ifp->l2type, hlen + plen, l2p));
+    driver_output(
+        ifp, mg_l2_trailer(ifp, hlen + plen, (uint8_t *) ip + hlen + plen));
   }
 }
 
@@ -679,8 +690,7 @@ static void rx_dhcp_client(struct mg_tcpip_if *ifp, struct pkt *pkt) {
       ifp->lease_expire = ifp->now + lease * 1000;
       MG_INFO(("Lease: %u sec (%lld)", lease, ifp->lease_expire / 1000));
       // assume DHCP server = router until ARP resolves
-      memcpy(ifp->gwmac, mg_l2_getaddr(ifp->l2type, pkt->l2),
-             sizeof(ifp->gwmac));
+      memcpy(ifp->gwmac, mg_l2_getaddr(ifp, pkt->l2), sizeof(ifp->gwmac));
       ifp->gw_ready = true;  // NOTE(): actual gw ARP won't retry now
       ifp->ip = ip, ifp->gw = gw, ifp->mask = mask;
       ifp->state = MG_TCPIP_STATE_IP;  // BOUND state
@@ -733,7 +743,7 @@ static void rx_dhcp_server(struct mg_tcpip_if *ifp, struct pkt *pkt) {
     memcpy(&res.options, opts, sizeof(opts));
     res.magic = pkt->dhcp->magic;
     res.xid = pkt->dhcp->xid;
-    mac = mg_l2_getaddr(ifp->l2type, pkt->l2);
+    mac = mg_l2_getaddr(ifp, pkt->l2);
     if (ifp->enable_get_gateway) {
       ifp->gw = res.yiaddr;  // set gw IP, best-effort gwmac as DHCP server's
       memcpy(ifp->gwmac, mac, sizeof(ifp->gwmac));
@@ -749,8 +759,8 @@ static struct ip6 *tx_ip6(struct mg_tcpip_if *ifp, uint8_t *l2_dst,
                           size_t plen) {
   // ifp->tx.buf is 8-bit aligned, keep other headers as pointers, see pkt
   uint8_t *l2p = (uint8_t *) ifp->tx.buf;
-  struct ip6 *ip6 = (struct ip6 *) mg_l2_header(
-      ifp->l2type, MG_TCPIP_L2PROTO_IPV6, ifp->mac, l2_dst, l2p);
+  struct ip6 *ip6 = (struct ip6 *) mg_l2_header(ifp, MG_TCPIP_L2PROTO_IPV6,
+                                                ifp->mac, l2_dst, l2p);
   memset(ip6, 0, sizeof(*ip6));
   ip6->ver = 0x60;  // Version 6, traffic class 0
   ip6->plen = mg_htons((uint16_t) plen);
@@ -766,7 +776,6 @@ static struct ip6 *tx_ip6(struct mg_tcpip_if *ifp, uint8_t *l2_dst,
 static void tx_icmp6(struct mg_tcpip_if *ifp, uint8_t *l2_dst, uint64_t *ip_src,
                      uint64_t *ip_dst, uint8_t type, uint8_t code,
                      const void *buf, size_t len) {
-  uint8_t *l2p = (uint8_t *) ifp->tx.buf;
   struct ip6 *ip6;
   struct icmp6 *icmp6;
   ip6 = tx_ip6(ifp, l2_dst, 58, ip_src, ip_dst, sizeof(*icmp6) + len);
@@ -777,8 +786,9 @@ static void tx_icmp6(struct mg_tcpip_if *ifp, uint8_t *l2_dst, uint64_t *ip_src,
   memcpy(icmp6 + 1, buf, len);  // Copy payload
   icmp6->csum = 0;              // RFC-4443 2.3, RFC-8200 8.1
   icmp6->csum = p6csum(ip6, icmp6, sizeof(*icmp6) + len);
-  driver_output(
-      ifp, mg_l2_footer(ifp->l2type, sizeof(*ip6) + sizeof(*icmp6) + len, l2p));
+  driver_output(ifp,
+                mg_l2_trailer(ifp, sizeof(*ip6) + sizeof(*icmp6) + len,
+                              (uint8_t *) (ip6 + 1) + sizeof(*icmp6) + len));
 }
 
 // Neighbor Discovery Protocol, RFC-4861
@@ -855,6 +865,10 @@ static void tx_ndp_ns(struct mg_tcpip_if *ifp, uint64_t *ip_dst,
   uint64_t ip_mcast[2] = {0, 0};
   uint8_t *l2 = l2_addr;
 
+  if (ifp->l2type == MG_TCPIP_L2_PPP || ifp->l2type == MG_TCPIP_L2_PPPoE) {
+    MG_DEBUG(("SKIP NS for %M", mg_print_ip6, ip_dst));
+    return;
+  }
   memset(payload, 0, sizeof(payload));
   memcpy(payload + 4, ip_dst, 16);
   if (mcast) {
@@ -907,13 +921,13 @@ static void fill_prefix(uint8_t *dst, uint8_t *src, uint8_t len) {
   }
 }
 
-static bool match_prefix(uint8_t *new, uint8_t *cur, uint8_t len) {
+static bool match_prefix(uint8_t *newp, uint8_t *curp, uint8_t len) {
   uint8_t full = len / 8;
   uint8_t rem = len % 8;
-  if (full > 0 && memcmp(cur, new, full) != 0) return false;
+  if (full > 0 && memcmp(curp, newp, full) != 0) return false;
   if (rem > 0) {
     uint8_t mask = (uint8_t) (0xFF << (8 - rem));
-    if (cur[full] != (new[full] & mask)) return false;
+    if (curp[full] != (newp[full] & mask)) return false;
   }
   return true;
 }
@@ -974,8 +988,8 @@ static void rx_ndp_ra(struct mg_tcpip_if *ifp, struct pkt *pkt) {
     // fill prefix and global
     if (gotprefix && !fill_global(ifp, prefix, prefix_len)) return;
     ifp->gw6[0] = pkt->ip6->src[0], ifp->gw6[1] = pkt->ip6->src[1];
-    if (gotl2addr) {
-      memcpy(ifp->gw6mac, l2, sizeof(ifp->gw6mac));
+    if (gotl2addr) memcpy(ifp->gw6mac, l2, sizeof(ifp->gw6mac));
+    if (gotl2addr || ifp->l2type == MG_TCPIP_L2_PPP || ifp->l2type == MG_TCPIP_L2_PPPoE) {
       ifp->state6 = MG_TCPIP_STATE_READY;
       ifp->gw6_ready = true;
     }
@@ -1026,6 +1040,10 @@ static void rx_icmp6(struct mg_tcpip_if *ifp, struct pkt *pkt) {
     case 136:  // Neighbor Advertisement
       rx_ndp_na(ifp, pkt);
       break;
+    default:
+      if (mg_log_level >= MG_LL_VERBOSE)
+        mg_hexdump(pkt->icmp6, pkt->pay.len > 16 ? 16 : pkt->pay.len);
+      break;
   }
 }
 
@@ -1036,12 +1054,12 @@ static void onstate6change(struct mg_tcpip_if *ifp) {
     if (ifp->l2type == MG_TCPIP_L2_ETH)  // TODO(): print other l2
       MG_INFO(("      MAC: %M", mg_print_mac, &ifp->mac));
   } else if (ifp->state6 == MG_TCPIP_STATE_IP) {
-    if (ifp->gw6[0] != 0 || ifp->gw6[1] != 0)
+    if ((ifp->gw6[0] != 0 || ifp->gw6[1] != 0) && (ifp->l2type != MG_TCPIP_L2_PPP && ifp->l2type != MG_TCPIP_L2_PPPoE))
       tx_ndp_ns(ifp, ifp->gw6, NULL);  // unsolicited GW hwaddr resolution
   } else if (ifp->state6 == MG_TCPIP_STATE_UP) {
     MG_INFO(("IP: %M", mg_print_ip6, &ifp->ip6ll));
   }
-  if (ifp->state6 != MG_TCPIP_STATE_UP && ifp->state6 != MG_TCPIP_STATE_DOWN)
+  if (ifp->state6 > MG_TCPIP_STATE_UP)
     mg_tcpip_call(ifp, MG_TCPIP_EV_ST6_CHG, &ifp->state6);
 }
 #endif
@@ -1074,16 +1092,16 @@ static uint8_t *get_return_l2addr(struct mg_tcpip_if *ifp, struct mg_addr *rem,
   if (rem->is_ip6) {
     if (rem->addr.ip6[0] == ifp->ip6ll[0] ||
         match_prefix((uint8_t *) rem->addr.ip6, ifp->prefix, ifp->prefix_len))
-      return mg_l2_getaddr(ifp->l2type, pkt->l2);  // same LAN, get from frame
-    if (ifp->gw6_ready)                            // use the router
-      return ifp->gw6mac;  // ignore source address in frame
+      return mg_l2_getaddr(ifp, pkt->l2);  // same LAN, get from frame
+    if (ifp->gw6_ready)                    // use the router
+      return ifp->gw6mac;                  // ignore source address in frame
   } else
 #endif
   {
     if (ifp->ip != 0 && ((rem->addr.ip4 & ifp->mask) == (ifp->ip & ifp->mask)))
-      return mg_l2_getaddr(ifp->l2type, pkt->l2);  // same LAN, get from frame
-    if (ifp->gw_ready)                             // use the router
-      return ifp->gwmac;  // ignore source address in frame
+      return mg_l2_getaddr(ifp, pkt->l2);  // same LAN, get from frame
+    if (ifp->gw_ready)                     // use the router
+      return ifp->gwmac;                   // ignore source address in frame
   }
   MG_ERROR(("%M %s: No way back, can't respond", mg_print_ip_port, rem,
             is_udp ? "UDP" : "TCP"));
@@ -1098,7 +1116,7 @@ static bool rx_udp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   s = (struct connstate *) (c + 1);
   c->rem.port = pkt->udp->sport;
 #if MG_ENABLE_IPV6
-  if (c->loc.is_ip6) { // matching of v4/v6 to dest is done bt getpeer()
+  if (c->loc.is_ip6) {  // matching of v4/v6 to dest is done bt getpeer()
     if (!udp6csum_ok(pkt->ip6, pkt->udp)) return false;
     c->rem.addr.ip6[0] = pkt->ip6->src[0],
     c->rem.addr.ip6[1] = pkt->ip6->src[1], c->rem.is_ip6 = true;
@@ -1128,7 +1146,7 @@ static size_t tx_tcp(struct mg_tcpip_if *ifp, uint8_t *l2_dst,
                      struct mg_addr *ip_src, struct mg_addr *ip_dst,
                      uint8_t flags, uint32_t seq, uint32_t ack, const void *buf,
                      size_t len) {
-  uint8_t *l2p = (uint8_t *) ifp->tx.buf;
+  uint8_t *l3p;
   struct ip *ip = NULL;
   struct tcp *tcp;
   uint16_t opts[4 / 2];
@@ -1138,31 +1156,34 @@ static size_t tx_tcp(struct mg_tcpip_if *ifp, uint8_t *l2_dst,
 #endif
 
   // Handle any options first, here, to determine header size
-  if (flags & TH_SYN) {          // Send MSS
+  if (flags & TH_SYN) {  // Send MSS
     uint16_t mss;
-#if MG_ENABLE_IPV6   // RFC-9293 3.7.1; RFC-6691 2
+#if MG_ENABLE_IPV6  // RFC-9293 3.7.1; RFC-6691 2
     mss = (uint16_t) (ifp->mtu - 60);
 #else
     mss = (uint16_t) (ifp->mtu - 40);
 #endif
     opts[0] = mg_htons(0x0204);  // RFC-9293 3.2
     opts[1] = mg_htons(mss);
-    hlen += sizeof(opts); // always whole number of 32-bit words
+    hlen += sizeof(opts);  // always whole number of 32-bit words
   }
 
 #if MG_ENABLE_IPV6
   if (ip_dst->is_ip6) {
-    ip6 = tx_ip6(ifp, l2_dst, 6, ip_src->addr.ip6, ip_dst->addr.ip6, hlen + len);
+    ip6 =
+        tx_ip6(ifp, l2_dst, 6, ip_src->addr.ip6, ip_dst->addr.ip6, hlen + len);
     tcp = (struct tcp *) (ip6 + 1);
+    l3p = (uint8_t *) ip6;
   } else
 #endif
   {
     ip = tx_ip(ifp, l2_dst, 6, ip_src->addr.ip4, ip_dst->addr.ip4, hlen + len);
     tcp = (struct tcp *) (ip + 1);
+    l3p = (uint8_t *) ip;
   }
   memset(tcp, 0, sizeof(*tcp));
-  memmove(tcp + 1, opts, hlen - sizeof(*tcp)); // copy opts if any
-  if (buf != NULL && len) memmove((uint8_t *)tcp + hlen, buf, len);
+  memmove(tcp + 1, opts, hlen - sizeof(*tcp));  // copy opts if any
+  if (buf != NULL && len) memmove((uint8_t *) tcp + hlen, buf, len);
   tcp->sport = ip_src->port;
   tcp->dport = ip_dst->port;
   tcp->seq = seq;
@@ -1181,7 +1202,8 @@ static size_t tx_tcp(struct mg_tcpip_if *ifp, uint8_t *l2_dst,
   MG_VERBOSE(("TCP %M -> %M fl %x len %u", mg_print_ip_port, ip_src,
               mg_print_ip_port, ip_dst, tcp->flags, len));
   return driver_output(
-      ifp, mg_l2_footer(ifp->l2type, PDIFF(l2p, tcp) + hlen + len, l2p));
+      ifp, mg_l2_trailer(ifp, PDIFF(l3p, (uint8_t *) tcp + hlen + len),
+                         (uint8_t *) tcp + hlen + len));
 }
 
 static size_t tx_tcp_ctrlresp(struct mg_tcpip_if *ifp, struct pkt *pkt,
@@ -1494,7 +1516,7 @@ static void backlog_poll(struct mg_mgr *mgr) {
 }
 
 // process options (MSS)
-static void handle_opt(struct connstate *s, struct tcp *tcp, bool ip6) {
+static bool handle_opt(struct connstate *s, struct tcp *tcp, bool ip6) {
   uint8_t *opts = (uint8_t *) (tcp + 1);
   int len = 4 * ((int) (tcp->off >> 4) - ((int) sizeof(*tcp) / 4));
   s->dmss = ip6 ? 1220 : 536;  // assume default, RFC-9293 3.7.1
@@ -1502,6 +1524,7 @@ static void handle_opt(struct connstate *s, struct tcp *tcp, bool ip6) {
     uint8_t kind = opts[0], optlen = 1;
     if (kind != 1) {         // No-Operation
       if (kind == 0) break;  // End of Option List
+      if (len < 2 || opts[1] == 0) return false; // Malformed options
       optlen = opts[1];
       if (kind == 2 && optlen == 4)  // set received MSS
         s->dmss = (uint16_t) (((uint16_t) opts[2] << 8) + opts[3]);
@@ -1510,12 +1533,13 @@ static void handle_opt(struct connstate *s, struct tcp *tcp, bool ip6) {
     opts += optlen;
     len -= optlen;
   }
+  return true;
 }
 
 static void rx_tcp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   struct mg_connection *c = getpeer(ifp->mgr, pkt, false);
   struct connstate *s = c == NULL ? NULL : (struct connstate *) (c + 1);
-#if MG_ENABLE_IPV6 // matching of v4/v6 to dest is done by getpeer()
+#if MG_ENABLE_IPV6  // matching of v4/v6 to dest is done by getpeer()
   if (pkt->ip6 != NULL && !tcp6csum_ok(pkt->ip6, pkt->tcp)) return;
 #endif
   if (pkt->ip != NULL && !tcpcsum_ok(pkt->ip, pkt->tcp)) return;
@@ -1524,7 +1548,7 @@ static void rx_tcp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   // - check clients (Group 1) and established connections (Group 3)
   if (c != NULL && c->is_connecting && pkt->tcp->flags == (TH_SYN | TH_ACK)) {
     // client got a server connection accept
-    handle_opt(s, pkt->tcp, pkt->ip6 != NULL);  // process options (MSS)
+    if (!handle_opt(s, pkt->tcp, pkt->ip6 != NULL)) return;  // process options (MSS)
     s->seq = mg_ntohl(pkt->tcp->ack), s->ack = mg_ntohl(pkt->tcp->seq) + 1;
     tx_tcp_ctrlresp(ifp, pkt, TH_ACK, pkt->tcp->ack);
     c->is_connecting = 0;  // Client connected
@@ -1535,8 +1559,9 @@ static void rx_tcp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   } else if (c != NULL && c->is_connecting && pkt->tcp->flags != TH_ACK) {
     mg_error(c, "connection refused");
   } else if (c != NULL && pkt->tcp->flags & TH_RST) {
-    // TODO(): validate RST is within window (and optional with proper ACK)
-    mg_error(c, "peer RST");  // RFC-1122 4.2.2.13
+    uint32_t seqno = mg_ntohl(pkt->tcp->seq);
+    if (seqno >= s->ack && seqno < (s->ack + MG_TCPIP_WIN))  // RFC-9293 3.5.3
+      mg_error(c, "peer RST");  // RFC-1122 4.2.2.13
   } else if (c != NULL) {
     // process segment
     s->tmiss = 0;                         // Reset missed keep-alive counter
@@ -1558,7 +1583,7 @@ static void rx_tcp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
       int key;
       uint32_t isn;
       if (pkt->tcp->sport != 0) {
-        handle_opt(&cs, pkt->tcp, pkt->ip6 != NULL);  // process options (MSS)
+        if (!handle_opt(&cs, pkt->tcp, pkt->ip6 != NULL)) return;  // process options (MSS)
         key = backlog_insert(c, pkt->tcp->sport,
                              cs.dmss);  // backlog options (MSS)
         if (key < 0) return;  // no room in backlog, discard SYN, client retries
@@ -1761,6 +1786,7 @@ static void mg_tcpip_rx(struct mg_tcpip_if *ifp, void *buf, size_t len) {
   pkt.raw.len = len;
   pkt.l2 = (uint8_t *) pkt.raw.buf;
   if (!mg_l2_rx(ifp, &proto, &pkt.pay, &pkt.raw)) return;
+  if (ifp->state < MG_TCPIP_STATE_UP) return;  // discard while L2 is not up
   if (proto == MG_TCPIP_L2PROTO_ARP) {
     pkt.arp = (struct arp *) (pkt.pay.buf);
     if (pkt.pay.len < sizeof(*pkt.arp)) return;  // Truncated
@@ -1776,7 +1802,7 @@ static void mg_tcpip_rx(struct mg_tcpip_if *ifp, void *buf, size_t len) {
 }
 
 static void mg_ip_poll(struct mg_tcpip_if *ifp, bool s1) {
-  if (ifp->state == MG_TCPIP_STATE_DOWN) return;
+  if (ifp->state < MG_TCPIP_STATE_UP) return;
   // DHCP RFC-2131 (4.4)
   if (ifp->enable_dhcp_client && s1) {
     if (ifp->state == MG_TCPIP_STATE_UP) {
@@ -1796,11 +1822,13 @@ static void mg_ip_poll(struct mg_tcpip_if *ifp, bool s1) {
     }
   }
 }
-static void mg_ip_link(struct mg_tcpip_if *ifp, bool up) {
-  bool current = ifp->state != MG_TCPIP_STATE_DOWN;
-  if (!up && ifp->enable_dhcp_client) ifp->ip = 0;
-  if (up != current) {  // link state has changed
-    ifp->state = up == false                               ? MG_TCPIP_STATE_DOWN
+static void mg_ip_link(struct mg_tcpip_if *ifp, bool drv_up, bool l2_up) {
+  bool cur_drv = (ifp->state != MG_TCPIP_STATE_DOWN);
+  bool cur_l2 = (ifp->state >= MG_TCPIP_STATE_UP);
+  if (!l2_up && ifp->enable_dhcp_client) ifp->ip = 0;
+  if (drv_up != cur_drv || l2_up != cur_l2) {  // link/L2 state has changed
+    ifp->state = !drv_up  ? MG_TCPIP_STATE_DOWN
+                 : !l2_up ? MG_TCPIP_STATE_LINK_UP
                  : ifp->enable_dhcp_client || ifp->ip == 0 ? MG_TCPIP_STATE_UP
                                                            : MG_TCPIP_STATE_IP;
     onstatechange(ifp);
@@ -1813,15 +1841,25 @@ static void mg_ip_link(struct mg_tcpip_if *ifp, bool up) {
 
 #if MG_ENABLE_IPV6
 static void mg_ip6_poll(struct mg_tcpip_if *ifp, bool s1) {
-  if (ifp->state6 == MG_TCPIP_STATE_DOWN) return;
+  if (ifp->state6 < MG_TCPIP_STATE_UP) return;
   if (ifp->enable_slaac && s1 && ifp->state6 == MG_TCPIP_STATE_UP)
     tx_ndp_rs(ifp);
 }
-static void mg_ip6_link(struct mg_tcpip_if *ifp, bool up) {
-  bool current = ifp->state6 != MG_TCPIP_STATE_DOWN;
-  if (!up && ifp->enable_slaac) ifp->ip6[0] = ifp->ip6[1] = 0;
-  if (up != current) {  // link state has changed
-    ifp->state6 = !up                                     ? MG_TCPIP_STATE_DOWN
+static void mg_ip6_link(struct mg_tcpip_if *ifp, bool drv_up, bool l2_up) {
+  bool cur_drv = (ifp->state6 != MG_TCPIP_STATE_DOWN);
+  bool cur_l2 = (ifp->state6 >= MG_TCPIP_STATE_UP);
+  if (drv_up != cur_drv || l2_up != cur_l2) {  // link/L2 state has changed
+    if (l2_up && ifp->ip6ll[0] == 0 && ifp->ip6ll[1] == 0) { // gen ll address
+      uint8_t px[8] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0};  // RFC-4291 2.5.6
+      mg_l2_genip6(ifp->l2type, ifp->ip6ll, 64, ifp->mac);
+      memcpy(ifp->ip6ll, px, 8);  // RFC-4291 2.5.4
+    }  // just got our link local address if we didn't have one.
+    // If static configuration is used, global addresses,
+    // prefix length, and gw are already filled at this point.
+    if (ifp->ip6[0] == 0 && ifp->ip6[1] == 0) ifp->enable_slaac = true;
+    if (!l2_up && ifp->enable_slaac) ifp->ip6[0] = ifp->ip6[1] = 0;
+    ifp->state6 = !drv_up  ? MG_TCPIP_STATE_DOWN
+                  : !l2_up ? MG_TCPIP_STATE_LINK_UP
                   : ifp->enable_slaac || ifp->ip6[0] == 0 ? MG_TCPIP_STATE_UP
                                                           : MG_TCPIP_STATE_IP;
     onstate6change(ifp);
@@ -1833,7 +1871,7 @@ static void mg_ip6_link(struct mg_tcpip_if *ifp, bool up) {
 }
 #else
 #define mg_ip6_poll(x, y)
-#define mg_ip6_link(x, y)
+#define mg_ip6_link(x, y, z)
 #endif
 
 static void mg_tcpip_poll(struct mg_tcpip_if *ifp, uint64_t now) {
@@ -1843,7 +1881,7 @@ static void mg_tcpip_poll(struct mg_tcpip_if *ifp, uint64_t now) {
 
   if (expired_1000ms) {
 #if MG_ENABLE_TCPIP_PRINT_DEBUG_STATS
-    const char *names[] = {"down", "up", "req", "ip", "ready"};
+    const char *names[] = {"down", "lnk up", "lnk rdy", "req", "ip", "ready"};
     size_t max = sizeof(names) / sizeof(char *);
     unsigned int state = ifp->state >= max ? max - 1 : ifp->state;
     MG_INFO(("Status: %s, IP: %M, rx:%u, tx:%u, dr:%u, er:%u", names[state],
@@ -1876,14 +1914,15 @@ static void mg_tcpip_poll(struct mg_tcpip_if *ifp, uint64_t now) {
     tx_ndp_ns(ifp, ifp->gw6, NULL);  // retry GW hwaddr resolution
 #endif
 
-  // poll driver
-  if (ifp->driver->poll) {
-    bool up = ifp->driver->poll(ifp, expired_1000ms);
-    // Handle physical interface up/down status, ifp->state rules over state6
-    if (expired_1000ms) {
-      mg_ip_link(ifp, up);   // Handle IPv4
-      mg_ip6_link(ifp, up);  // Handle IPv6
-      if (ifp->state == MG_TCPIP_STATE_DOWN) MG_ERROR(("Network is down"));
+  {  // poll driver and let L2 do its work, if any
+    // Handle physical interface up/down status
+    bool drv_up, l2_up;
+    drv_up = ifp->driver->poll ? ifp->driver->poll(ifp, expired_1000ms) : true;
+    l2_up = mg_l2_poll(ifp, expired_1000ms);  // Handle L2 up/down link status;
+    if (expired_1000ms) {                     // ifp->state rules over state6
+      mg_ip_link(ifp, drv_up, l2_up);             // Handle IPv4
+      mg_ip6_link(ifp, drv_up, l2_up);            // Handle IPv6
+      if (ifp->state < MG_TCPIP_STATE_UP) MG_ERROR(("Network is down"));
       mg_tcpip_call(ifp, MG_TCPIP_EV_TIMER_1S, NULL);
     }
   }
@@ -1891,8 +1930,7 @@ static void mg_tcpip_poll(struct mg_tcpip_if *ifp, uint64_t now) {
   mg_ip_poll(ifp, expired_1000ms);   // Handle IPv4
   mg_ip6_poll(ifp, expired_1000ms);  // Handle IPv6
 
-  if (ifp->state == MG_TCPIP_STATE_DOWN) return;
-  // Read data from the network
+  // Read data from the network (mg_tcpip_rx() will discard for us)
   if (ifp->driver->rx != NULL) {  // Simple polling driver, returns one frame
     size_t len =
         ifp->driver->rx(ifp->recv_queue.buf, ifp->recv_queue.size, ifp);
@@ -1908,6 +1946,7 @@ static void mg_tcpip_poll(struct mg_tcpip_if *ifp, uint64_t now) {
       mg_queue_del(&ifp->recv_queue, len);
     }
   }
+  if (ifp->state < MG_TCPIP_STATE_UP) return;  // need to let L2 do its job
 
   // Process timeouts
   for (c = ifp->mgr->conns; c != NULL; c = c->next) {
@@ -1960,7 +1999,7 @@ void mg_tcpip_qwrite(void *buf, size_t len, struct mg_tcpip_if *ifp) {
 
 void mg_tcpip_init(struct mg_mgr *mgr, struct mg_tcpip_if *ifp) {
   // If L2 address is not set, make a random one; fill MTU
-  mg_l2_init(ifp->l2type, ifp->mac, &ifp->mtu, &ifp->framesize);
+  mg_l2_init(ifp);
 
   if (ifp->dhcp_name[0] == '\0')  // If DHCP name is not set, use "mip"
     memcpy(ifp->dhcp_name, "mip", 4);
@@ -1978,20 +2017,12 @@ void mg_tcpip_init(struct mg_mgr *mgr, struct mg_tcpip_if *ifp) {
     mgr->ifp = ifp;
     ifp->mgr = mgr;
     mgr->extraconnsize = sizeof(struct connstate);
-    if (ifp->ip == 0) ifp->enable_dhcp_client = true;
+    if (ifp->ip == 0 && ifp->l2type != MG_TCPIP_L2_PPP &&
+        ifp->l2type != MG_TCPIP_L2_PPPoE)
+      ifp->enable_dhcp_client = true;
     mg_random(&ifp->eport, sizeof(ifp->eport));  // Random from 0 to 65535
     ifp->eport |= MG_EPHEMERAL_PORT_BASE;        // Random from
                                            // MG_EPHEMERAL_PORT_BASE to 65535
-#if MG_ENABLE_IPV6
-    if (ifp->ip6ll[0] == 0 && ifp->ip6ll[1] == 0) {    // gen link-local address
-      uint8_t px[8] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0};  // RFC-4291 2.5.6
-      mg_l2_genip6(ifp->l2type, ifp->ip6ll, 64, ifp->mac);
-      memcpy(ifp->ip6ll, px, 8);  // RFC-4291 2.5.4
-    }  // just got our link local address if we didn't.
-    // If static configuration is used, global addresses,
-    // prefix length, and gw are already filled at this point.
-    if (ifp->ip6[0] == 0 && ifp->ip6[1] == 0) ifp->enable_slaac = true;
-#endif
     if (ifp->tx.buf == NULL || ifp->recv_queue.buf == NULL) MG_ERROR(("OOM"));
   }
 }

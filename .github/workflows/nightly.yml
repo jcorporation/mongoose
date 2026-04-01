@@ -74,7 +74,7 @@ jobs:
     - uses: webfactory/ssh-agent@v0.9.1
       with:
             ssh-private-key: ${{ secrets.HEALTH_TESTS_SSH_KEY }}
-    - run: if [ "${{ matrix.target }}" == "mip_tap_test" ]; then ./test/setup_ga_network.sh ; fi && sudo apt -y update ; sudo apt -y install libmbedtls-dev libwolfssl-dev && make -C test ${{ matrix.target }} IPV6=0 > log
+    - run: if [ "${{ matrix.target }}" == "mip_tap_test" ]; then ./test/setup_ga_network.sh ; export IPV6=0; else export IPV6=1 ; fi && sudo apt -y update ; sudo apt -y install libmbedtls-dev libwolfssl-dev && make -C test ${{ matrix.target }} > log
     - if: success() || failure()
       run: |
         cat log
@@ -92,7 +92,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with: { fetch-depth: 2 }
-    - run: make -C test ${{ matrix.target }}
+    - run: make -C test ${{ matrix.target }} IPV6=1
   s390:
     runs-on: ubuntu-latest
     strategy:
@@ -329,6 +329,7 @@ jobs:
           - path: pico-sdk/pico-2-w-picosdk-baremetal-builtin
           - path: pico-sdk/w5500-evb-pico-picosdk-baremetal-builtin
           - path: pico-sdk/w5500-evb-pico2-picosdk-baremetal-builtin
+          - path: pico-sdk/w55rp20-evb-pico-picosdk-baremetal-builtin
           - path: stm32/nucleo-f429zi-make-baremetal-builtin
           - path: stm32/nucleo-f429zi-make-freertos-builtin
           - path: stm32/nucleo-f746zg-make-baremetal-builtin
@@ -498,3 +499,11 @@ jobs:
         with: { fetch-depth: 2 }
       - run: sudo pip install yq
       - run: cd test/cube && make
+
+#  xpresso_examples:
+#    runs-on: ubuntu-latest
+#    steps:
+#      - uses: actions/checkout@v4
+#        with: { fetch-depth: 2 }
+#      - run: sudo pip install yq
+#      - run: cd test/xpresso && make
