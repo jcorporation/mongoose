@@ -152,19 +152,19 @@ struct dhcp6 {
 };
 
 struct pseudoip {
-  uint32_t src;   // Source IP
-  uint32_t dst;   // Destination IP
+  uint32_t src;  // Source IP
+  uint32_t dst;  // Destination IP
   uint8_t zero;
   uint8_t proto;  // Upper level protocol
   uint16_t len;   // Datagram length
 };
 
 struct pseudoip6 {
-  uint64_t src[2];   // Source IP
-  uint64_t dst[2];   // Destination IP
-  uint32_t plen;     // Payload length
+  uint64_t src[2];  // Source IP
+  uint64_t dst[2];  // Destination IP
+  uint32_t plen;    // Payload length
   uint8_t zero[3];
-  uint8_t next;      // Upper level protocol
+  uint8_t next;  // Upper level protocol
 };
 
 #if defined(__DCC__)
@@ -262,14 +262,17 @@ static bool icmpcsum_ok(const void *d, size_t len) {
 static uint16_t pcsum(void *d, void *p, size_t plen) {
   uint32_t sum;
   struct ip *ip = (struct ip *) d;
+#if defined(__DCC__)
+  volatile  /* Makes PPC & Diab4.3 happy */
+#endif
   struct pseudoip pip;
   pip.src = ip->src;
   pip.dst = ip->dst;
   pip.zero = 0;
   pip.proto = ip->proto;
   pip.len = mg_htons((uint16_t) plen);
-  sum = csumup(0, &pip, sizeof(pip)); // even length
-  sum = csumup(sum, p, plen); // possibly odd length: last
+  sum = csumup(0, &pip, sizeof(pip));  // even length
+  sum = csumup(sum, p, plen);          // possibly odd length: last
   return csumfin(sum);
 }
 
@@ -282,27 +285,31 @@ static bool udpcsum_ok(void *d, void *u) {
 
 static bool tcpcsum_ok(void *d, void *t) {
   struct ip *ip = (struct ip *) d;
-  return (pcsum(d, t, (size_t)(mg_ntohs(ip->len) - (ip->ver & 0x0F) * 4)) == 0);
+  return (pcsum(d, t, (size_t) (mg_ntohs(ip->len) - (ip->ver & 0x0F) * 4)) ==
+          0);
 }
 
 #if MG_ENABLE_IPV6
 static uint16_t p6csum(void *d, void *p, size_t plen) {
   uint32_t sum;
   struct ip6 *ip6 = (struct ip6 *) d;
+#if defined(__DCC__)
+  volatile  /* Makes PPC & Diab4.3 happy */
+#endif
   struct pseudoip6 pip6;
   pip6.src[0] = ip6->src[0], pip6.src[1] = ip6->src[1];
   pip6.dst[0] = ip6->dst[0], pip6.dst[1] = ip6->dst[1];
   pip6.zero[0] = 0, pip6.zero[1] = 0, pip6.zero[2] = 0;
   pip6.plen = mg_htonl((uint32_t) plen);
   pip6.next = ip6->next;
-  sum = csumup(0, &pip6, sizeof(pip6)); // even length
-  sum = csumup(sum, p, plen); // possibly odd length: last
+  sum = csumup(0, &pip6, sizeof(pip6));  // even length
+  sum = csumup(sum, p, plen);            // possibly odd length: last
   return csumfin(sum);
 }
 
 static bool udp6csum_ok(void *d, void *u) {
   struct udp *udp = (struct udp *) u;
-  if (udp->csum == 0) return false; // mandatory in IPv6
+  if (udp->csum == 0) return false;  // mandatory in IPv6
   if (udp->csum == 0xFFFF) udp->csum = 0;
   return (p6csum(d, u, (size_t) mg_ntohs(udp->len)) == 0);
 }
@@ -330,15 +337,9 @@ static void ip6sn(uint64_t *addr, uint64_t *sn_addr) {
 }
 
 static const struct mg_addr ip6_allrouters = {
-    .addr = {.ip = {0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02}},
-    .port = 0,
-    .scope_id = 0,
-    .is_ip6 = true};
+    {{0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02}}, 0, 0, true};
 static const struct mg_addr ip6_allnodes = {
-    .addr = {.ip = {0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01}},
-    .port = 0,
-    .scope_id = 0,
-    .is_ip6 = true};
+    {{0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01}}, 0, 0, true};
 
 #define MG_IP6MATCH(a, b) (a[0] == b[0] && a[1] == b[1])
 #endif
@@ -547,11 +548,16 @@ static struct mg_connection *getpeer(struct mg_mgr *mgr, struct pkt *pkt,
     }
 #endif
     if (c->is_udp && pkt->udp && c->loc.port == pkt->udp->dport &&
-        !(c->loc.is_ip6 ^ (pkt->ip6 != NULL))) // IP or IPv6 to same dest
+        !(c->loc.is_ip6 ^ (pkt->ip6 != NULL)))  // IP or IPv6 to same dest
       break;
     if (!c->is_udp && pkt->tcp && c->loc.port == pkt->tcp->dport &&
-        !(c->loc.is_ip6 ^ (pkt->ip6 != NULL)) && lsn == (bool) c->is_listening &&
-        (lsn || c->rem.port == pkt->tcp->sport))
+        ((lsn && c->is_listening && !(c->loc.is_ip6 ^ (pkt->ip6 != NULL))) ||
+         (!lsn && !c->is_listening && c->rem.port == pkt->tcp->sport &&
+          ((!c->loc.is_ip6 && c->rem.addr.ip4 == pkt->ip->src)
+#if MG_ENABLE_IPV6
+           || (c->loc.is_ip6 && MG_IP6MATCH(c->rem.addr.ip6, pkt->ip6->src))
+#endif
+               )))) // validate addr for established (not listening) conns
       break;
   }
   return c;
@@ -907,13 +913,13 @@ static void fill_prefix(uint8_t *dst, uint8_t *src, uint8_t len) {
   }
 }
 
-static bool match_prefix(uint8_t *new, uint8_t *cur, uint8_t len) {
+static bool match_prefix(uint8_t *newp, uint8_t *curp, uint8_t len) {
   uint8_t full = len / 8;
   uint8_t rem = len % 8;
-  if (full > 0 && memcmp(cur, new, full) != 0) return false;
+  if (full > 0 && memcmp(curp, newp, full) != 0) return false;
   if (rem > 0) {
     uint8_t mask = (uint8_t) (0xFF << (8 - rem));
-    if (cur[full] != (new[full] & mask)) return false;
+    if (curp[full] != (newp[full] & mask)) return false;
   }
   return true;
 }
@@ -1098,7 +1104,7 @@ static bool rx_udp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   s = (struct connstate *) (c + 1);
   c->rem.port = pkt->udp->sport;
 #if MG_ENABLE_IPV6
-  if (c->loc.is_ip6) { // matching of v4/v6 to dest is done bt getpeer()
+  if (c->loc.is_ip6) {  // matching of v4/v6 to dest is done bt getpeer()
     if (!udp6csum_ok(pkt->ip6, pkt->udp)) return false;
     c->rem.addr.ip6[0] = pkt->ip6->src[0],
     c->rem.addr.ip6[1] = pkt->ip6->src[1], c->rem.is_ip6 = true;
@@ -1138,21 +1144,22 @@ static size_t tx_tcp(struct mg_tcpip_if *ifp, uint8_t *l2_dst,
 #endif
 
   // Handle any options first, here, to determine header size
-  if (flags & TH_SYN) {          // Send MSS
+  if (flags & TH_SYN) {  // Send MSS
     uint16_t mss;
-#if MG_ENABLE_IPV6   // RFC-9293 3.7.1; RFC-6691 2
+#if MG_ENABLE_IPV6  // RFC-9293 3.7.1; RFC-6691 2
     mss = (uint16_t) (ifp->mtu - 60);
 #else
     mss = (uint16_t) (ifp->mtu - 40);
 #endif
     opts[0] = mg_htons(0x0204);  // RFC-9293 3.2
     opts[1] = mg_htons(mss);
-    hlen += sizeof(opts); // always whole number of 32-bit words
+    hlen += sizeof(opts);  // always whole number of 32-bit words
   }
 
 #if MG_ENABLE_IPV6
   if (ip_dst->is_ip6) {
-    ip6 = tx_ip6(ifp, l2_dst, 6, ip_src->addr.ip6, ip_dst->addr.ip6, hlen + len);
+    ip6 =
+        tx_ip6(ifp, l2_dst, 6, ip_src->addr.ip6, ip_dst->addr.ip6, hlen + len);
     tcp = (struct tcp *) (ip6 + 1);
   } else
 #endif
@@ -1161,8 +1168,8 @@ static size_t tx_tcp(struct mg_tcpip_if *ifp, uint8_t *l2_dst,
     tcp = (struct tcp *) (ip + 1);
   }
   memset(tcp, 0, sizeof(*tcp));
-  memmove(tcp + 1, opts, hlen - sizeof(*tcp)); // copy opts if any
-  if (buf != NULL && len) memmove((uint8_t *)tcp + hlen, buf, len);
+  memmove(tcp + 1, opts, hlen - sizeof(*tcp));  // copy opts if any
+  if (buf != NULL && len) memmove((uint8_t *) tcp + hlen, buf, len);
   tcp->sport = ip_src->port;
   tcp->dport = ip_dst->port;
   tcp->seq = seq;
@@ -1494,7 +1501,7 @@ static void backlog_poll(struct mg_mgr *mgr) {
 }
 
 // process options (MSS)
-static void handle_opt(struct connstate *s, struct tcp *tcp, bool ip6) {
+static bool handle_opt(struct connstate *s, struct tcp *tcp, bool ip6) {
   uint8_t *opts = (uint8_t *) (tcp + 1);
   int len = 4 * ((int) (tcp->off >> 4) - ((int) sizeof(*tcp) / 4));
   s->dmss = ip6 ? 1220 : 536;  // assume default, RFC-9293 3.7.1
@@ -1502,6 +1509,7 @@ static void handle_opt(struct connstate *s, struct tcp *tcp, bool ip6) {
     uint8_t kind = opts[0], optlen = 1;
     if (kind != 1) {         // No-Operation
       if (kind == 0) break;  // End of Option List
+      if (len < 2 || opts[1] == 0) return false; // Malformed options
       optlen = opts[1];
       if (kind == 2 && optlen == 4)  // set received MSS
         s->dmss = (uint16_t) (((uint16_t) opts[2] << 8) + opts[3]);
@@ -1510,12 +1518,13 @@ static void handle_opt(struct connstate *s, struct tcp *tcp, bool ip6) {
     opts += optlen;
     len -= optlen;
   }
+  return true;
 }
 
 static void rx_tcp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   struct mg_connection *c = getpeer(ifp->mgr, pkt, false);
   struct connstate *s = c == NULL ? NULL : (struct connstate *) (c + 1);
-#if MG_ENABLE_IPV6 // matching of v4/v6 to dest is done by getpeer()
+#if MG_ENABLE_IPV6  // matching of v4/v6 to dest is done by getpeer()
   if (pkt->ip6 != NULL && !tcp6csum_ok(pkt->ip6, pkt->tcp)) return;
 #endif
   if (pkt->ip != NULL && !tcpcsum_ok(pkt->ip, pkt->tcp)) return;
@@ -1524,7 +1533,7 @@ static void rx_tcp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   // - check clients (Group 1) and established connections (Group 3)
   if (c != NULL && c->is_connecting && pkt->tcp->flags == (TH_SYN | TH_ACK)) {
     // client got a server connection accept
-    handle_opt(s, pkt->tcp, pkt->ip6 != NULL);  // process options (MSS)
+    if (!handle_opt(s, pkt->tcp, pkt->ip6 != NULL)) return;  // process options (MSS)
     s->seq = mg_ntohl(pkt->tcp->ack), s->ack = mg_ntohl(pkt->tcp->seq) + 1;
     tx_tcp_ctrlresp(ifp, pkt, TH_ACK, pkt->tcp->ack);
     c->is_connecting = 0;  // Client connected
@@ -1535,8 +1544,9 @@ static void rx_tcp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   } else if (c != NULL && c->is_connecting && pkt->tcp->flags != TH_ACK) {
     mg_error(c, "connection refused");
   } else if (c != NULL && pkt->tcp->flags & TH_RST) {
-    // TODO(): validate RST is within window (and optional with proper ACK)
-    mg_error(c, "peer RST");  // RFC-1122 4.2.2.13
+    uint32_t seqno = mg_ntohl(pkt->tcp->seq);
+    if (seqno >= s->ack && seqno < (s->ack + MG_TCPIP_WIN))  // RFC-9293 3.5.3
+      mg_error(c, "peer RST");  // RFC-1122 4.2.2.13
   } else if (c != NULL) {
     // process segment
     s->tmiss = 0;                         // Reset missed keep-alive counter
@@ -1558,7 +1568,7 @@ static void rx_tcp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
       int key;
       uint32_t isn;
       if (pkt->tcp->sport != 0) {
-        handle_opt(&cs, pkt->tcp, pkt->ip6 != NULL);  // process options (MSS)
+        if (!handle_opt(&cs, pkt->tcp, pkt->ip6 != NULL)) return;  // process options (MSS)
         key = backlog_insert(c, pkt->tcp->sport,
                              cs.dmss);  // backlog options (MSS)
         if (key < 0) return;  // no room in backlog, discard SYN, client retries

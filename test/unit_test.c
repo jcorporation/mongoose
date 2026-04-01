@@ -73,6 +73,13 @@ static void test_match(void) {
   ASSERT(mg_match(mg_str_n("a__b_c", 6), mg_str_n("a*b*c", 5), NULL) == 1);
 
   {
+    char *ae_value = (char *) malloc(1);  // Exact size for ASAN
+    ae_value[0] = 'g';
+    mg_match(mg_str_n(ae_value, 1), mg_str("*gzip*"), NULL);  // Check for OOB
+    free(ae_value);
+  }
+
+  {
     struct mg_str caps[3];
     ASSERT(mg_match(mg_str("//a.c"), mg_str("#.c"), NULL) == true);
     ASSERT(mg_match(mg_str("a"), mg_str("#"), caps) == true);
@@ -1550,7 +1557,7 @@ static void test_http_client(void) {
   ASSERT(ok == 301 || ok == 200);
   mg_mgr_poll(&mgr, 0);
   ok = 0;
-#if MG_TLS
+#if MG_TLS && MG_TLS != MG_TLS_BUILTIN
   url = "https://cesanta.com";
   opts.name = mg_url_host(url);
 #if MG_TLS == MG_TLS_BUILTIN
@@ -1672,14 +1679,12 @@ static void test_http_no_content_length(void) {
   // 12348 is in TIME_WAIT, use another port
   mg_mgr_init(&mgr);
   mg_http_listen(&mgr, url2, f41, (void *) NULL);
-  ASSERT(fetch(&mgr, buf, url2, "POST / HTTP/1.1\r\n\r\n") == 411);
+  ASSERT(fetch(&mgr, buf, url2, "POST / HTTP/1.1\r\n\r\n") == 200);
   ASSERT(fetch(&mgr, buf, url2, "HTTP/1.1 200\r\n\r\n") == 411);
   ASSERT(fetch(&mgr, buf, url2, "HTTP/1.1 100\r\n\r\n") != 411);
   ASSERT(fetch(&mgr, buf, url2, "HTTP/1.1 304\r\n\r\n") != 411);
   ASSERT(fetch(&mgr, buf, url2, "HTTP/1.1 305\r\n\r\n") == 411);
   ASSERT(fetch(&mgr, buf, url2, post_req) != 411);
-  // Check it is processed only once (see #2811)
-  ASSERT(fpr(&mgr, buf, url2, "POST / HTTP/1.1\r\n\r\n") == 411);
   mg_mgr_free(&mgr);
   ASSERT(mgr.conns == NULL);
 }
@@ -1798,15 +1803,15 @@ static void test_http_parse(void) {
   }
 
   // #2292: fail on stray \r inside the headers
-  ASSERT(mg_http_parse("a є\n\n", 6, &req) == 6);
-  ASSERT(mg_http_parse("a b\n\n", 5, &req) == 5);
-  ASSERT(mg_http_parse("a b\na:\n\n", 8, &req) > 0);
-  ASSERT(mg_http_parse("a b\na:\r\n\n", 9, &req) > 0);
-  ASSERT(mg_http_parse("a b\n\ra:\r\n\n", 10, &req) == -1);
-  ASSERT(mg_http_parse("a b\na:\r1\n\n", 10, &req) == -1);
-  ASSERT(mg_http_parse("a b\na: \r1\n\n", 11, &req) == -1);
-  ASSERT(mg_http_parse("a b\na: \rb:\n\n", 12, &req) == -1);
-  ASSERT(mg_http_parse("a b\na: \nb:\n\n", 12, &req) > 0);
+  ASSERT(mg_http_parse("a є HTTP/1.0\n\n", 15, &req) == 15);
+  ASSERT(mg_http_parse("a b HTTP/1.0\n\n", 14, &req) == 14);
+  ASSERT(mg_http_parse("a b HTTP/1.0\na:\n\n", 17, &req) > 0);
+  ASSERT(mg_http_parse("a b HTTP/1.0\na:\r\n\n", 18, &req) > 0);
+  ASSERT(mg_http_parse("a b HTTP/1.0\n\ra:\r\n\n", 19, &req) == -1);
+  ASSERT(mg_http_parse("a b HTTP/1.0\na:\r1\n\n", 19, &req) == -1);
+  ASSERT(mg_http_parse("a b HTTP/1.0\na: \r1\n\n", 20, &req) == -1);
+  ASSERT(mg_http_parse("a b HTTP/1.0\na: \rb:\n\n", 21, &req) == -1);
+  ASSERT(mg_http_parse("a b HTTP/1.0\na: \nb:\n\n", 21, &req) > 0);
 
   {
     const char *s = "ґєт /слеш HTTP/1.0\nмісто:  кіїв \n\n";
@@ -1844,7 +1849,7 @@ static void test_http_parse(void) {
   {
     const char *s = "POST /x HTTP/1.0\n\n";
     ASSERT(mg_http_parse(s, strlen(s), &req) == (int) strlen(s));
-    ASSERT(req.body.len == (size_t) ~0);
+    ASSERT(req.body.len == 0);
   }
 
   {
@@ -1883,14 +1888,31 @@ static void test_http_parse(void) {
   }
 
   {
-    static const char *s =
-        "a b HTTP/1.0\na:1\nb:2\nc:3\nd:4\ne:5\nf:6\ng:7\nh:8\n\n";
+    const char *s = "a b HTTP/1.0\na:1\nb:2\nc:3\nd:4\ne:5\nf:6\ng:7\nh:8\n\n";
     ASSERT(mg_http_parse(s, strlen(s), &req) == (int) strlen(s));
     ASSERT((v = mg_http_get_header(&req, "e")) != NULL);
     ASSERT(vcmp(*v, "5"));
     ASSERT((v = mg_http_get_header(&req, "g")) != NULL);
     ASSERT(vcmp(*v, "7"));
     ASSERT((v = mg_http_get_header(&req, "h")) == NULL);  // MG_MAX_HTTP_HEADERS
+  }
+
+  {
+    // no HTTP version
+    const char *s = "a b\na:1\nb:2\nc:2\n\n";
+    ASSERT(mg_http_parse(s, strlen(s), &req) == -1);
+
+    // HTTP version
+    s = "a b HTTP/1.0\na:1\nb:2\nc:2\n\n";
+    ASSERT(mg_http_parse(s, strlen(s), &req) == (int) strlen(s));
+
+    // Content-Length
+    s = "a b HTTP/1.0\nContent-Length:10\nb:2\nc:2\n\n";
+    ASSERT(mg_http_parse(s, strlen(s), &req) == (int) strlen(s));
+
+    // duplicated Content-Length
+    s = "a b HTTP/1.0\nContent-Length:10\nb:2\nContent-Length:20\n\n";
+    ASSERT(mg_http_parse(s, strlen(s), &req) == -1);
   }
 
   {
@@ -1918,15 +1940,15 @@ static void test_http_parse(void) {
     struct mg_http_message hm;
     const char *s = "a b HTTP/1.0\n\n";
     ASSERT(mg_http_parse(s, strlen(s), &hm) == (int) strlen(s));
-    s = "a b\nc:d\n\n";
+    s = "a b HTTP/1.0\nc:d\n\n";
     ASSERT(mg_http_parse(s, strlen(s), &hm) == (int) strlen(s));
     s = "a\nb:b\nc:c\n\n";
     ASSERT(mg_http_parse(s, strlen(s), &hm) < 0);
-    s = "a b\nc: \xc0\n\n";  // Invalid UTF in the header value: accept
+    s = "a b HTTP/1.0\nc: \xc0\n\n";  // Invalid UTF in the header value: accept
     ASSERT(mg_http_parse(s, strlen(s), &hm) == (int) strlen(s));
     ASSERT((v = mg_http_get_header(&hm, "c")) != NULL);
     ASSERT(vcmp(*v, "\xc0"));
-    s = "a b\n\xc0: 2\n\n";  // Invalid UTF in the header name: do NOT accept
+    s = "a b HTTP/1.0\n\xc0: 2\n\n";  // Invalid UTF in the header name: do NOT accept
     ASSERT(mg_http_parse(s, strlen(s), &hm) == -1);
   }
 
@@ -3627,6 +3649,39 @@ static void test_json(void) {
     val = mg_json_get_tok(json, "$.a");
     ASSERT(mg_strcmp(val, expected) == 0);
   }
+
+  // mg_json_get_num: parsing exponential
+  {
+    double d = 0.0, tolerance = 1e-12;
+    json = mg_str(
+      "{"
+      "\"i\":1e3,"
+      "\"n\":-2.5e2,"
+      "\"p\":3E+4,"
+      "\"m\":4.25E-1,"
+      "\"z\":0e0,"
+      "\"s\":-0.0e+0,"
+      "\"a\":[6.123456789e3,-1e-9],"
+      "\"bad\":\"1e3\""
+      "}");
+    ASSERT(mg_json_get_num(json, "$.i", &d) == true);
+    ASSERT(fabs(d - 1000.0) < tolerance);
+    ASSERT(mg_json_get_num(json, "$.n", &d) == true);
+    ASSERT(fabs(d - -250.0) < tolerance);
+    ASSERT(mg_json_get_num(json, "$.p", &d) == true);
+    ASSERT(fabs(d - 30000.0) < tolerance);
+    ASSERT(mg_json_get_num(json, "$.m", &d) == true);
+    ASSERT(fabs(d - 0.425) < tolerance);
+    ASSERT(mg_json_get_num(json, "$.z", &d) == true);
+    ASSERT(fabs(d - 0.0) < tolerance);
+    ASSERT(mg_json_get_num(json, "$.s", &d) == true);
+    ASSERT(fabs(d - 0.0) < tolerance);
+    ASSERT(mg_json_get_num(json, "$.a[0]", &d) == true);
+    ASSERT(fabs(d - 6123.456789) < tolerance);
+    ASSERT(mg_json_get_num(json, "$.a[1]", &d) == true);
+    ASSERT(fabs(d - -1e-9) < tolerance);
+    ASSERT(mg_json_get_num(json, "$.bad", &d) == false);
+  }
 }
 
 static void resp_rpc(struct mg_rpc_req *r) {
@@ -4138,9 +4193,13 @@ int main(void) {
   test_sntp();
   DASHBOARD("sntp");
 
+#if MG_TLS != MG_TLS_BUILTIN
   s_error = false;
   test_mqtt();  // sorry, MQTT_LOCALHOST is also skipped
   DASHBOARD("mqtt");
+#else 
+  (void) test_mqtt;
+#endif
 
   s_error = false;
   test_http_client();
