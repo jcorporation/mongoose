@@ -10515,7 +10515,6 @@ static void setlocaddr(MG_SOCKET_TYPE fd, struct mg_addr *addr) {
 }
 
 // Get the local 'addr' the stack will use to connect to 'to'
-void mg_getlocaddr(struct mg_connection *c, struct mg_addr *to, struct mg_addr *addr);
 void mg_getlocaddr(struct mg_connection *c, struct mg_addr *to, struct mg_addr *addr) {
   union usa usa;
   socklen_t slen;
