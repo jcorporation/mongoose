@@ -47,8 +47,8 @@ struct mg_tcpip_if {
   bool enable_get_gateway;                // DCHP server sets client as gateway
   bool enable_req_dns;                    // DCHP client requests DNS server
   bool enable_req_sntp;                   // DCHP client requests SNTP server
-  bool enable_crc32_check;         // Do a CRC check on RX frames and strip it
-  bool enable_mac_check;           // Do a MAC check on RX frames
+  bool enable_fcs_check;           // Do a FCS check on RX frames and strip it
+  bool enable_mac_check;           // Do a hw addr check on RX frames
   bool update_mac_hash_table;      // Signal drivers to update MAC controller
   struct mg_tcpip_driver *driver;  // Low level driver
   void *driver_data;               // Driver-specific data
@@ -70,7 +70,8 @@ struct mg_tcpip_if {
 
   // Internal state, user can use it but should not change it
   uint8_t gwmac[sizeof(struct mg_l2addr)];  // Router's hw address
-  enum mg_l2type l2type;                    // Ethernet, PPP, etc.
+  enum mg_l2type l2type;                    // Ethernet, PPP, etc. (l2.h)
+  union mg_l2data l2data;                   // config and state for L2 (l2.h)
   char *dns4_url;                           // DNS server URL
   uint64_t now;                             // Current time
   uint64_t timer_1000ms;        // 1000 ms timer: for DHCP and link state
@@ -82,11 +83,12 @@ struct mg_tcpip_if {
   volatile uint32_t nerr;       // Number of driver errors
   uint8_t state;                // Current link and IPv4 state
 #define MG_TCPIP_STATE_DOWN 0   // Interface is down
-#define MG_TCPIP_STATE_UP 1     // Interface is up
-#define MG_TCPIP_STATE_REQ 2    // Interface is up, DHCP REQUESTING state
-#define MG_TCPIP_STATE_IP 3     // Interface is up and has an IP assigned
-#define MG_TCPIP_STATE_READY 4  // Interface has fully come up, ready to work
-  bool gw_ready;                // We've got a hw address for the router
+#define MG_TCPIP_STATE_LINK_UP 1  // Driver reports link state is up
+#define MG_TCPIP_STATE_UP 2       // Interface is up --> LINK_READY
+#define MG_TCPIP_STATE_REQ 3      // Interface is up, DHCP REQUESTING state
+#define MG_TCPIP_STATE_IP 4       // Interface is up and has an IP assigned
+#define MG_TCPIP_STATE_READY 5    // Interface has fully come up, ready to work
+  bool gw_ready;                  // We've got a hw address for the router
 #if MG_ENABLE_IPV6
   uint8_t gw6mac[sizeof(struct mg_l2addr)];  // IPV6 Router's hw address
   uint8_t state6;                            // Current IPv6 state
@@ -111,19 +113,20 @@ extern struct mg_tcpip_driver mg_tcpip_driver_cmsis;
 extern struct mg_tcpip_driver mg_tcpip_driver_ra;
 extern struct mg_tcpip_driver mg_tcpip_driver_xmc;
 extern struct mg_tcpip_driver mg_tcpip_driver_xmc7;
-extern struct mg_tcpip_driver mg_tcpip_driver_ppp;
 extern struct mg_tcpip_driver mg_tcpip_driver_pico_w;
 extern struct mg_tcpip_driver mg_tcpip_driver_rw612;
 extern struct mg_tcpip_driver mg_tcpip_driver_cyw;
 extern struct mg_tcpip_driver mg_tcpip_driver_nxp_wifi;
 extern struct mg_tcpip_driver mg_tcpip_driver_st67w6;
+extern struct mg_tcpip_driver mg_tcpip_driver_atcmd;
 
 // Drivers that require SPI, can use this SPI abstraction
 struct mg_tcpip_spi {
-  void *spi;                        // Opaque SPI bus descriptor
-  void (*begin)(void *);            // SPI begin: slave select low
-  void (*end)(void *);              // SPI end: slave select high
-  uint8_t (*txn)(void *, uint8_t);  // SPI transaction: write 1 byte, read reply
+  void *spi;              // Opaque SPI bus descriptor
+  void (*begin)(void *);  // SPI begin: slave select active
+  void (*end)(void *);    // SPI end: slave select inactive
+  void (*txn)(void *, uint8_t *write, uint8_t *read,
+              size_t len);  // SPI transaction: write-read len bytes
 };
 
 // Alignment and memory section requirements

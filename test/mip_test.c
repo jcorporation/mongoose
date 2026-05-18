@@ -62,7 +62,7 @@ static bool executed = false;
 
 static void mif_fn(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
   if (ev == MG_TCPIP_EV_ST_CHG) {
-    ASSERT(*(uint8_t *) ev_data == MG_TCPIP_STATE_READY);
+    ASSERT(*(uint8_t *) ev_data == MG_TCPIP_STATE_UP); 
     executed = true;
   }
   (void) ifp;
@@ -72,7 +72,7 @@ static void test_statechange(void) {
   struct mg_tcpip_if iface;
   memset(&iface, 0, sizeof(iface));
   iface.ip = mg_htonl(0x01020304);
-  iface.state = MG_TCPIP_STATE_READY;
+  iface.state = MG_TCPIP_STATE_UP; // READY now sends gratuitous ARP
   iface.driver = &mg_tcpip_driver_mock;
   iface.fn = mif_fn;
   onstatechange(&iface);
@@ -82,7 +82,7 @@ static void test_statechange(void) {
 #if MG_ENABLE_IPV6
 static void mif6_fn(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
   if (ev == MG_TCPIP_EV_ST6_CHG) {
-    ASSERT(*(uint8_t *) ev_data == MG_TCPIP_STATE_READY);
+    ASSERT(*(uint8_t *) ev_data == MG_TCPIP_STATE_REQ);
     executed = true;
   }
   (void) ifp;
@@ -93,7 +93,7 @@ static void test_state6change(void) {
   memset(&iface, 0, sizeof(iface));
   iface.ip6[0] = mg_htonll(0x01020304);
   iface.ip6[1] = mg_htonll(0x05060708);
-  iface.state6 = MG_TCPIP_STATE_READY;
+  iface.state6 = MG_TCPIP_STATE_REQ; // READY now sends gratuitous NA, > UP
   iface.driver = &mg_tcpip_driver_mock;
   iface.fn = mif6_fn;
   onstate6change(&iface);
@@ -378,8 +378,8 @@ static void test_tcp_basics(bool ipv6) {
 
   init_tcp_tests(&mgr, &e, &ipp, &driver, &mif, fn);
 
-  // https://datatracker.ietf.org/doc/html/rfc9293#section-3.5.2	Reset
-  // Generation non-used port. Group 1 in RFC send SYN, expect RST + ACK
+  // - https://datatracker.ietf.org/doc/html/rfc9293#section-3.5.2
+  // Reset generation, non-used port. Group 1 in RFC send SYN expect RST + ACK
   create_tcp_seg(&e, &ipp, 1234, 4321, TH_SYN, 1, 69, 0, NULL, 0);
   mg_mgr_poll(&mgr, 0);  // make sure we clean former stuff in buffer
   while (!received_response(&s_driver_data)) mg_mgr_poll(&mgr, 0);
@@ -469,7 +469,7 @@ static void test_tcp_basics(bool ipv6) {
   ASSERT(t->flags == TH_RST);
   ASSERT(t->seq == mg_htonl(4321));
 
-  // we currently don't validate checksum, no silently discarded segment test
+  // no silently discarded segment test
 
   init_tcp_handshake(&e, &ipp, &mgr);  // starts with seq_no=1000, ackno=2
 
@@ -675,6 +675,55 @@ static void test_tcp_basics(bool ipv6) {
   //  ASSERT(mgr.conns->next != NULL);  // more than one connection: the
   //  listener + us create_tcp_simpleseg(&e, &ipp, 1002, 3, TH_ACK, 0); // ACK
   //  FIN mg_mgr_poll(&mgr, 0);
+  // make sure it is closed
+  ASSERT(mgr.conns->next == NULL);  // only one connection: the listener
+
+  s_driver_data.len = 0;
+  mg_mgr_free(&mgr);
+
+  // Test RST handling
+  // https://datatracker.ietf.org/doc/html/rfc9293#section-3.5.3
+  init_tcp_tests(&mgr, &e, &ipp, &driver, &mif, fn);
+  init_tcp_handshake(&e, &ipp, &mgr);  // starts with seq_no=1000, ackno=2
+
+  // RST with seq_no way out of window
+  create_tcp_seg(&e, &ipp, 1000000, 2, TH_RST, 1, 80, 0, NULL, 0);
+  mg_mgr_poll(&mgr, 0);
+  ASSERT(!received_response(&s_driver_data));
+  // make sure it is NOT closed
+  ASSERT(mgr.conns->next != NULL);  // two connections: listener + ours
+
+  {  // RST with seq_no within window but alien address
+    uint32_t ip4 = 0;
+#if MG_ENABLE_IPV6  // forge source address
+    uint64_t ip6_0 = 0;
+    if (ipp.ip6 != NULL) {
+      ip6_0 = ip6.src[0];
+      ip6.src[0] = ip6.src[0] << 1;
+    } else
+#endif
+    {
+      ip4 = ip.src;
+      ip.src = ip.src << 1;
+    }
+    create_tcp_seg(&e, &ipp, 1010, 2, TH_RST, 1, 80, 0, NULL, 0);
+    mg_mgr_poll(&mgr, 0);
+    ASSERT(!received_response(&s_driver_data));
+    // make sure it is NOT closed
+    ASSERT(mgr.conns->next != NULL);  // two connections: listener + ours
+#if MG_ENABLE_IPV6  // restore source address
+    if (ipp.ip6 != NULL) {
+      ip6.src[0] = ip6_0;
+    } else
+#endif
+    {
+      ip.src = ip4;
+    }
+  }
+  // RST with seq_no within window
+  create_tcp_seg(&e, &ipp, 1010, 2, TH_RST, 1, 80, 0, NULL, 0);
+  mg_mgr_poll(&mgr, 0);
+  ASSERT(!received_response(&s_driver_data));
   // make sure it is closed
   ASSERT(mgr.conns->next == NULL);  // only one connection: the listener
 

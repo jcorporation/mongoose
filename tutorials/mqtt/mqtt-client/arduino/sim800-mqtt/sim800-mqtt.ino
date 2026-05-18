@@ -28,7 +28,7 @@ static const char *script[] = {
 //SoftwareSerial ModemSerial(RX_PIN, TX_PIN);
 
 struct mg_connection *mqtt_connection;
-struct mg_tcpip_driver_ppp_data driver_data;
+struct mg_tcpip_driver_atcmd_data driver_data;
 struct mg_mgr mgr;                                     // Mongoose event manager
 struct mg_tcpip_if mif = {.mac = {2, 0, 1, 2, 3, 5}};  // Network interface
 
@@ -106,14 +106,14 @@ void setup() {
   mg_log_set(MG_LL_DEBUG);  // Set debug log level
   mg_log_set_fn([](char c, void *) { Serial.print(c); }, NULL);  // Log serial
 
-  mif.driver = &mg_tcpip_driver_ppp;  // Initialise built-in TCP/IP stack
-  mif.driver_data = &driver_data;     // with the cellular driver
+  mif.driver = &mg_tcpip_driver_atcmd;  // Initialise built-in TCP/IP stack
+  mif.l2type = MG_TCPIP_L2_PPP;         // with the cellular driver
+  mif.driver_data = &driver_data;
   driver_data.script = script;
   driver_data.reset = [](void *) { digitalWrite(RST_PIN, LOW); delay(1); digitalWrite(RST_PIN, HIGH); },
   driver_data.tx = [](void *, uint8_t c) { ModemSerial.write(c); },
   driver_data.rx = [](void *) { return ModemSerial.available() ? ModemSerial.read() : -1; },
   mg_tcpip_init(&mgr, &mif);
-  mif.enable_dhcp_client = false;
 }
 
 void loop() {

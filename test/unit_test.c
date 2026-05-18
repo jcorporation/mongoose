@@ -775,7 +775,8 @@ static void test_mqtt_ver(uint8_t mqtt_version) {
   memset(mbuf + 1, 0, sizeof(mbuf) - 1);
   test_data.flags = 0;
 
-  opts.props = 0; opts.num_props = 0;
+  opts.props = 0;
+  opts.num_props = 0;
   mg_mqtt_unsub(c, &opts);
   for (i = 0; i < 500 && test_data.flags == 0; i++) mg_mgr_poll(&mgr, 10);
   ASSERT(test_data.flags == flags_unsubscribed);
@@ -786,12 +787,25 @@ static void test_mqtt_ver(uint8_t mqtt_version) {
   ASSERT(mgr.conns == NULL);
 }
 
+static void test_mqtt_parse(void) {
+  struct mg_mqtt_message mm;
+  struct mg_mqtt_prop prop;
+  // MQTT5 PUBLISH with Subscription Identifier = 5
+  const uint8_t sub_id_pkt[] = {0x30, 0x06, 0x00, 0x01, 'x', 0x02, 0x0B, 0x05};
+
+  memset(&mm, 0, sizeof(struct mg_mqtt_message));
+  memset(&prop, 0, sizeof(struct mg_mqtt_prop));
+  ASSERT(mg_mqtt_parse(sub_id_pkt, sizeof(sub_id_pkt), 5, &mm) == MQTT_OK);
+  mg_mqtt_next_prop(&mm, &prop, 0);
+}
+
 static void test_mqtt(void) {
   test_mqtt_base();
 #ifdef NO_MQTT_TESTS
   MG_ERROR(("MQTT tests skipped on request"));
   (void) test_mqtt_basic, (void) test_mqtt_ver;
 #else
+  test_mqtt_parse();
   test_mqtt_basic();
   test_mqtt_ver(4);
   test_mqtt_ver(5);
@@ -1473,7 +1487,8 @@ static void test_tls(void) {
                "%s",
                bd.len, bd.buf) == 200);
   ASSERT(cmpbody(buf, bd.buf) == 0);
-#if MG_TLS == MG_TLS_BUILTIN && defined(__linux__) && MG_ENABLE_CHACHA20  // skip for non-CHACHA tests
+#if MG_TLS == MG_TLS_BUILTIN && defined(__linux__) && \
+    MG_ENABLE_CHACHA20  // skip for non-CHACHA tests
   // fire patched server, test multiple TLS records per TCP segment handling
   // skip other TLS stacks to avoid "bad client hello", we are 1.3 only
   if (access("tls_multirec/server", X_OK) == 0) {
@@ -1948,7 +1963,8 @@ static void test_http_parse(void) {
     ASSERT(mg_http_parse(s, strlen(s), &hm) == (int) strlen(s));
     ASSERT((v = mg_http_get_header(&hm, "c")) != NULL);
     ASSERT(vcmp(*v, "\xc0"));
-    s = "a b HTTP/1.0\n\xc0: 2\n\n";  // Invalid UTF in the header name: do NOT accept
+    s = "a b HTTP/1.0\n\xc0: 2\n\n";  // Invalid UTF in the header name: do NOT
+                                      // accept
     ASSERT(mg_http_parse(s, strlen(s), &hm) == -1);
   }
 
@@ -1966,6 +1982,15 @@ static void test_http_parse(void) {
     s = "a b HTTP/1.0\nd: \te\t \n\n";
     ASSERT(mg_http_parse(s, strlen(s), &hm) == (int) strlen(s));
     ASSERT(mg_strcmp(hm.headers[0].value, mg_str("e")) == 0);
+  }
+
+  {
+    // Test that query-string gets stripped
+    struct mg_http_message hm;
+    const char *s = "GET /foo?bar HTTP/1.0\n\n";
+    ASSERT(mg_http_parse(s, strlen(s), &hm) == (int) strlen(s));
+    ASSERT(mg_strcmp(hm.uri, mg_str("/foo")) == 0);
+    ASSERT(mg_strcmp(hm.query, mg_str("bar")) == 0);
   }
 }
 
@@ -3211,6 +3236,7 @@ static void eh7(struct mg_connection *c, int ev, void *ev_data) {
     memset(&sopts, 0, sizeof(sopts));
     sopts.root_dir = "/";
     sopts.fs = &mg_fs_packed;
+    mg_mem_files = mg_packed_files;
     mg_http_serve_dir(c, hm, &sopts);
   }
 }
@@ -3514,14 +3540,23 @@ static void test_json(void) {
   {
     char to[4], expect[4] = {0, 0, 0, 0};
     memset(to, 0, sizeof(to));
-    ASSERT(mg_json_unescape(mg_str("\\u0000"), to, 4) &&
-           memcmp(to, expect, 4) == 0);
+    json = mg_str("\"\\u0000\"");
+    ASSERT(mg_json_unescape(json, "$", to, 4) && memcmp(to, expect, 4) == 0);
     to[0] = 0;
     expect[0] = (char) 0xff;
-    ASSERT(mg_json_unescape(mg_str("\\u00ff"), to, 4) &&
-           memcmp(to, expect, 4) == 0);
-    ASSERT(!mg_json_unescape(mg_str("\\u0100"), to, 4));
-    ASSERT(!mg_json_unescape(mg_str("\\u1000"), to, 4));
+    json = mg_str("\"\\u00ff\"");
+    ASSERT(mg_json_unescape(json, "$", to, 4) && memcmp(to, expect, 4) == 0);
+    json = mg_str("\"\\u0100\"");
+    ASSERT(mg_json_unescape(json, "$", to, 4) == 0);
+    json = mg_str("\"\\u1000\"");
+    ASSERT(mg_json_unescape(json, "$", to, 4) == 0);
+    json = mg_str("{\"a\":\"\"}");
+    mg_snprintf(to, sizeof(to), "hi");
+    ASSERT(mg_json_unescape(json, "$.a", to, sizeof(to)) == 0);
+    ASSERT(to[0] == '\0');
+    json = mg_str("{\"a\":\"b\"}");
+    ASSERT(mg_json_unescape(json, "$.a", to, sizeof(to)) == 1);
+    ASSERT(strcmp(to, "b") == 0);
   }
 
   {
@@ -3654,16 +3689,16 @@ static void test_json(void) {
   {
     double d = 0.0, tolerance = 1e-12;
     json = mg_str(
-      "{"
-      "\"i\":1e3,"
-      "\"n\":-2.5e2,"
-      "\"p\":3E+4,"
-      "\"m\":4.25E-1,"
-      "\"z\":0e0,"
-      "\"s\":-0.0e+0,"
-      "\"a\":[6.123456789e3,-1e-9],"
-      "\"bad\":\"1e3\""
-      "}");
+        "{"
+        "\"i\":1e3,"
+        "\"n\":-2.5e2,"
+        "\"p\":3E+4,"
+        "\"m\":4.25E-1,"
+        "\"z\":0e0,"
+        "\"s\":-0.0e+0,"
+        "\"a\":[6.123456789e3,-1e-9],"
+        "\"bad\":\"1e3\""
+        "}");
     ASSERT(mg_json_get_num(json, "$.i", &d) == true);
     ASSERT(fabs(d - 1000.0) < tolerance);
     ASSERT(mg_json_get_num(json, "$.n", &d) == true);
@@ -4098,10 +4133,353 @@ static void test_crypto(void) {
 #define DASHBOARD(x) \
   printf("HEALTH_DASHBOARD\t\"%s\": %s,\n", x, s_error ? "false" : "true");
 
+static uint8_t coils_database[25] = {
+    0x4D, 0x9C, 0xAA, 0x55, 0xCC, 0xA3, 0x66, 0xAF, 0x60,
+    0xBC, 0xCC, 0x6C, 0x53, 0xFF, 0x00, 0x55, 0x3C, 0x0F,
+    0xF0, 0x8F, 0x54, 0x99, 0xF8, 0x0D, 0x2A,
+};
+
+static bool modbus_read_coil(uint16_t i) {
+  uint16_t start_byte = i / 8;
+  int bit_pos = i % 8;
+  uint8_t data = ((coils_database[start_byte] >> bit_pos) & 0x01);
+  return data;
+}
+
+static void modbus_srv(struct mg_connection *c, int ev, void *ev_data) {
+  struct mg_modbus_req *mr = (struct mg_modbus_req *) ev_data;
+  uint16_t i, r;
+  size_t tc = *(size_t *) c->fn_data + 1;
+  static bool coil_1[] = {1};
+  static bool coil_7[] = {1, 0, 1, 0, 1, 0, 1};
+  static uint16_t reg_1[] = {0x0001};
+  static uint16_t reg_7[] = {0x0001, 0x0002, 0x0003, 0x0004,
+                             0x0005, 0x0006, 0x0007};
+
+  if (ev == MG_EV_READ) {
+    *(size_t *) c->fn_data += 1;
+  } else if (ev == MG_EV_MODBUS_REQ) {
+    if (mr->addr == 0xFFFF) {
+      mr->error = MG_MODBUS_ERR_ILLEGAL_ADDRESS;
+      return;
+    }
+    switch (mr->func) {
+      case MG_MODBUS_FUNC_READ_COILS:
+      case MG_MODBUS_FUNC_READ_DISCRETE_INPUTS:
+        if (tc != 0x1D) {
+          for (i = 0; i < mr->len; i++) {
+            mr->u.bits[i] = (mr->len == 1 ? coil_1[i] : coil_7[i]);
+          }
+        } else {
+          for (i = 0; i < mr->len; i++) {
+            mr->u.bits[i] = modbus_read_coil(i);
+          }
+        }
+        break;
+      case MG_MODBUS_FUNC_READ_HOLDING_REGISTERS:
+      case MG_MODBUS_FUNC_READ_INPUT_REGISTERS:
+        if (tc == 0x1c) {
+          mr->error = MG_MODBUS_ERR_DEVICE_FAILURE;
+          break;
+        }
+        if (mr->len == 1) {
+          mr->u.regs[0] = reg_1[0];
+        } else if (mr->len == 7) {
+          for (i = 0; i < 7; i++) mr->u.regs[i] = reg_7[i];
+        } else {
+          mr->error = MG_MODBUS_ERR_ILLEGAL_ADDRESS;
+        }
+        break;
+
+      case MG_MODBUS_FUNC_WRITE_SINGLE_COIL:
+        switch (tc) {
+          case 0x05:
+            ASSERT(mr->len == 1);
+            ASSERT(mr->addr == 0x14);
+            ASSERT(mr->u.bits != NULL);
+            ASSERT(mr->u.bits[0] == true);
+            break;
+          default:
+            ASSERT(false);
+            return;
+        }
+        break;
+      case MG_MODBUS_FUNC_WRITE_SINGLE_REGISTER:
+        switch (tc) {
+          case 0x06:
+            ASSERT(mr->len == 1);
+            ASSERT(mr->addr == 0x15);
+            ASSERT(mr->u.regs != NULL);
+            ASSERT(mr->u.regs[0] == 1);
+            break;
+          default:
+            ASSERT(false);
+            return;
+        }
+        break;
+      case MG_MODBUS_FUNC_WRITE_MULTIPLE_COILS:
+        switch (tc) {
+          case 0x14:
+            ASSERT(mr->addr == 0x23);
+            ASSERT(mr->len == 1);
+            ASSERT(mr->u.bits != NULL);
+            ASSERT(mr->u.bits[0] == true);
+            break;
+          case 0x15:
+            ASSERT(mr->addr == 0x24);
+            ASSERT(mr->len == 7);
+            ASSERT(mr->u.bits != NULL);
+            for (i = 0; i < 7; i++) {
+              ASSERT(mr->u.bits[i] == coil_7[i]);
+            }
+            break;
+          default:
+            ASSERT(false);
+            return;
+        }
+        break;
+      case MG_MODBUS_FUNC_WRITE_MULTIPLE_REGISTERS:
+        switch (tc) {
+          case 0x17:
+            r = 0;
+            ASSERT(mr->addr == 0x26);
+            ASSERT(mr->len == 1);
+            ASSERT(mr->u.regs != NULL);
+            r = mr->u.regs[0];
+            ASSERT(r == 1);
+            break;
+          case 0x18:
+            ASSERT(mr->addr == 0x27);
+            ASSERT(mr->len == 7);
+            ASSERT(mr->u.regs != NULL);
+            for (i = 0; i < 7; i++) {
+              r = mr->u.regs[i];
+              ASSERT(r == reg_7[i]);
+            }
+            break;
+          default:
+            ASSERT(false);
+            return;
+        }
+        break;
+      default:
+        mr->error = MG_MODBUS_ERR_ILLEGAL_FUNCTION;
+        break;
+    }
+  }
+  (void) c, (void) ev_data;
+}
+
+static void test_modbus(void) {
+  struct modbus_test {
+    const char *name;
+    uint8_t req[256];
+    size_t req_len;
+    uint8_t resp[256];
+    size_t resp_len;
+  } tests[] = {
+      {"read coils - 1 @ 0x0010",
+       {0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x01, 0x01, 0x00, 0x10, 0x00, 0x01},
+       12,
+       {0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x01, 0x01, 0x01, 0x01},
+       10},
+      {"read discrete inputs - 1 @ 0x0011",
+       {0x00, 0x02, 0x00, 0x00, 0x00, 0x06, 0x01, 0x02, 0x00, 0x11, 0x00, 0x01},
+       12,
+       {0x00, 0x02, 0x00, 0x00, 0x00, 0x04, 0x01, 0x02, 0x01, 0x01},
+       10},
+      {"read holding registers - 1 @ 0x0012",
+       {0x00, 0x03, 0x00, 0x00, 0x00, 0x06, 0x01, 0x03, 0x00, 0x12, 0x00, 0x01},
+       12,
+       {0x00, 0x03, 0x00, 0x00, 0x00, 0x05, 0x01, 0x03, 0x02, 0x00, 0x01},
+       11},
+      {"read input registers - 1 @ 0x0013",
+       {0x00, 0x04, 0x00, 0x00, 0x00, 0x06, 0x01, 0x04, 0x00, 0x13, 0x00, 0x01},
+       12,
+       {0x00, 0x04, 0x00, 0x00, 0x00, 0x05, 0x01, 0x04, 0x02, 0x00, 0x01},
+       11},
+      {"write single coil @ 0x0014 = 1",
+       {0x00, 0x05, 0x00, 0x00, 0x00, 0x06, 0x01, 0x05, 0x00, 0x14, 0xFF, 0x00},
+       12,
+       {0x00, 0x05, 0x00, 0x00, 0x00, 0x06, 0x01, 0x05, 0x00, 0x14, 0xFF, 0x00},
+       12},
+      {"write single register @ 0x0015 = 1",
+       {0x00, 0x06, 0x00, 0x00, 0x00, 0x06, 0x01, 0x06, 0x00, 0x15, 0x00, 0x01},
+       12,
+       {0x00, 0x06, 0x00, 0x00, 0x00, 0x06, 0x01, 0x06, 0x00, 0x15, 0x00, 0x01},
+       12},
+
+      /* --- Multi-value reads: 0, 1, 7 --- */
+
+      {"read coils - 0 @ 0x0016",
+       {0x00, 0x07, 0x00, 0x00, 0x00, 0x06, 0x01, 0x01, 0x00, 0x16, 0x00, 0x00},
+       12,
+       {0x00, 0x07, 0x00, 0x00, 0x00, 0x03, 0x01, 0x81, 0x03},
+       9},
+      {"read coils - 1 @ 0x0017",
+       {0x00, 0x08, 0x00, 0x00, 0x00, 0x06, 0x01, 0x01, 0x00, 0x17, 0x00, 0x01},
+       12,
+       {0x00, 0x08, 0x00, 0x00, 0x00, 0x04, 0x01, 0x01, 0x01, 0x01},
+       10},
+      {"read coils - 7 @ 0x0018",
+       {0x00, 0x09, 0x00, 0x00, 0x00, 0x06, 0x01, 0x01, 0x00, 0x18, 0x00, 0x07},
+       12,
+       {0x00, 0x09, 0x00, 0x00, 0x00, 0x04, 0x01, 0x01, 0x01, 0x55},
+       10},
+
+      {"read discrete inputs - 0 @ 0x0019",
+       {0x00, 0x0A, 0x00, 0x00, 0x00, 0x06, 0x01, 0x02, 0x00, 0x19, 0x00, 0x00},
+       12,
+       {0x00, 0x0A, 0x00, 0x00, 0x00, 0x03, 0x01, 0x82, 0x03},
+       9},
+      {"read discrete inputs - 1 @ 0x001A",
+       {0x00, 0x0B, 0x00, 0x00, 0x00, 0x06, 0x01, 0x02, 0x00, 0x1A, 0x00, 0x01},
+       12,
+       {0x00, 0x0B, 0x00, 0x00, 0x00, 0x04, 0x01, 0x02, 0x01, 0x01},
+       10},
+      {"read discrete inputs - 7 @ 0x001B",
+       {0x00, 0x0C, 0x00, 0x00, 0x00, 0x06, 0x01, 0x02, 0x00, 0x1B, 0x00, 0x07},
+       12,
+       {0x00, 0x0C, 0x00, 0x00, 0x00, 0x04, 0x01, 0x02, 0x01, 0x55},
+       10},
+
+      {"read holding registers - 0 @ 0x001C",
+       {0x00, 0x0D, 0x00, 0x00, 0x00, 0x06, 0x01, 0x03, 0x00, 0x1C, 0x00, 0x00},
+       12,
+       {0x00, 0x0D, 0x00, 0x00, 0x00, 0x03, 0x01, 0x83, 0x03},
+       9},
+      {"read holding registers - 1 @ 0x001D",
+       {0x00, 0x0E, 0x00, 0x00, 0x00, 0x06, 0x01, 0x03, 0x00, 0x1D, 0x00, 0x01},
+       12,
+       {0x00, 0x0E, 0x00, 0x00, 0x00, 0x05, 0x01, 0x03, 0x02, 0x00, 0x01},
+       11},
+      {"read holding registers - 7 @ 0x001E",
+       {0x00, 0x0F, 0x00, 0x00, 0x00, 0x06, 0x01, 0x03, 0x00, 0x1E, 0x00, 0x07},
+       12,
+       {0x00, 0x0F, 0x00, 0x00, 0x00, 0x11, 0x01, 0x03, 0x0E, 0x00, 0x01, 0x00,
+        0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07},
+       23},
+
+      {"read input registers - 0 @ 0x001F",
+       {0x00, 0x10, 0x00, 0x00, 0x00, 0x06, 0x01, 0x04, 0x00, 0x1F, 0x00, 0x00},
+       12,
+       {0x00, 0x10, 0x00, 0x00, 0x00, 0x03, 0x01, 0x84, 0x03},
+       9},
+      {"read input registers - 1 @ 0x0020",
+       {0x00, 0x11, 0x00, 0x00, 0x00, 0x06, 0x01, 0x04, 0x00, 0x20, 0x00, 0x01},
+       12,
+       {0x00, 0x11, 0x00, 0x00, 0x00, 0x05, 0x01, 0x04, 0x02, 0x00, 0x01},
+       11},
+      {"read input registers - 7 @ 0x0021",
+       {0x00, 0x12, 0x00, 0x00, 0x00, 0x06, 0x01, 0x04, 0x00, 0x21, 0x00, 0x07},
+       12,
+       {0x00, 0x12, 0x00, 0x00, 0x00, 0x11, 0x01, 0x04, 0x0E, 0x00, 0x01, 0x00,
+        0x02, 0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07},
+       23},
+      {"write multiple coils - 0 @ 0x0022",
+       {0x00, 0x13, 0x00, 0x00, 0x00, 0x07, 0x01, 0x0F, 0x00, 0x22, 0x00, 0x00,
+        0x00},
+       13,
+       {0x00, 0x13, 0x00, 0x00, 0x00, 0x03, 0x01, 0x8F, 0x03},
+       9},
+      {"write multiple coils - 1 @ 0x0023",
+       {0x00, 0x14, 0x00, 0x00, 0x00, 0x08, 0x01, 0x0F, 0x00, 0x23, 0x00, 0x01,
+        0x01, 0x01},
+       14,
+       {0x00, 0x14, 0x00, 0x00, 0x00, 0x06, 0x01, 0x0F, 0x00, 0x23, 0x00, 0x01},
+       12},
+      {"write multiple coils - 7 @ 0x0024",
+       {0x00, 0x15, 0x00, 0x00, 0x00, 0x08, 0x01, 0x0F, 0x00, 0x24, 0x00, 0x07,
+        0x01, 0x55},
+       14,
+       {0x00, 0x15, 0x00, 0x00, 0x00, 0x06, 0x01, 0x0F, 0x00, 0x24, 0x00, 0x07},
+       12},
+
+      {"write multiple registers - 0 @ 0x0025",
+       {0x00, 0x16, 0x00, 0x00, 0x00, 0x07, 0x01, 0x10, 0x00, 0x25, 0x00, 0x00,
+        0x00},
+       13,
+       {0x00, 0x16, 0x00, 0x00, 0x00, 0x03, 0x01, 0x90, 0x03},
+       9},
+      {"write multiple registers - 1 @ 0x0026",
+       {0x00, 0x17, 0x00, 0x00, 0x00, 0x09, 0x01, 0x10, 0x00, 0x26, 0x00, 0x01,
+        0x02, 0x00, 0x01},
+       15,
+       {0x00, 0x17, 0x00, 0x00, 0x00, 0x06, 0x01, 0x10, 0x00, 0x26, 0x00, 0x01},
+       12},
+      {"write multiple registers - 7 @ 0x0027",
+       {0x00, 0x18, 0x00, 0x00, 0x00, 0x15, 0x01, 0x10, 0x00,
+        0x27, 0x00, 0x07, 0x0E, 0x00, 0x01, 0x00, 0x02, 0x00,
+        0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07},
+       27,
+       {0x00, 0x18, 0x00, 0x00, 0x00, 0x06, 0x01, 0x10, 0x00, 0x27, 0x00, 0x07},
+       12},
+
+      /* --- Standard Modbus exception cases --- */
+
+      {"illegal function",
+       {0x00, 0x19, 0x00, 0x00, 0x00, 0x06, 0x01, 0x11, 0x00, 0x28, 0x00, 0x01},
+       12,
+       {0x00, 0x19, 0x00, 0x00, 0x00, 0x03, 0x01, 0x91, 0x01},
+       9},
+      {"illegal data address",
+       {0x00, 0x1A, 0x00, 0x00, 0x00, 0x06, 0x01, 0x03, 0xFF, 0xFF, 0x00, 0x01},
+       12,
+       {0x00, 0x1A, 0x00, 0x00, 0x00, 0x03, 0x01, 0x83, 0x02},
+       9},
+      {"illegal data value - bad coil value",
+       {0x00, 0x1B, 0x00, 0x00, 0x00, 0x06, 0x01, 0x05, 0x00, 0x29, 0x12, 0x34},
+       12,
+       {0x00, 0x1B, 0x00, 0x00, 0x00, 0x03, 0x01, 0x85, 0x03},
+       9},
+      {"server device failure",
+       {0x00, 0x1C, 0x00, 0x00, 0x00, 0x06, 0x01, 0x04, 0x00, 0x2A, 0x00, 0x01},
+       12,
+       {0x00, 0x1C, 0x00, 0x00, 0x00, 0x03, 0x01, 0x84, 0x04},
+       9},
+
+      /* --- Stress Test ---*/
+      {"read coils - 200 @ 0x0000",
+       {0x00, 0x1D, 0x00, 0x00, 0x00, 0x06, 0x01, 0x01, 0x00, 0x00, 0x00, 0xC8},
+       12,
+       {0x00, 0x1D, 0x00, 0x00, 0x00, 0x1C, 0x01, 0x01, 0x19, 0x4D, 0x9C, 0xAA,
+        0x55, 0xCC, 0xA3, 0x66, 0xAF, 0x60, 0xBC, 0xCC, 0x6C, 0x53, 0xFF, 0x00,
+        0x55, 0x3C, 0x0F, 0xF0, 0x8F, 0x54, 0x99, 0xF8, 0x0D, 0x2A},
+       34},
+  };
+
+  struct mg_mgr mgr;
+  struct mg_connection *c;
+  const char *url = "tcp://localhost:32625";
+  size_t i, j, total = 0, num_tests = sizeof(tests) / sizeof(tests[0]);
+
+  mg_mgr_init(&mgr);
+  mg_modbus_listen(&mgr, url, modbus_srv, &total);
+  c = mg_connect(&mgr, url, NULL, NULL);
+
+  for (i = 0; i < num_tests; i++) {
+    MG_INFO(("TEST %s", tests[i].name));
+    mg_send(c, tests[i].req, tests[i].req_len);
+    for (j = 0; j < 20; j++) mg_mgr_poll(&mgr, 1);
+    mg_hexdump(tests[i].req, tests[i].req_len);
+    mg_hexdump(tests[i].resp, tests[i].resp_len);
+    mg_hexdump(c->recv.buf, c->recv.len);
+    ASSERT(c->recv.len == tests[i].resp_len);
+    ASSERT(memcmp(c->recv.buf, tests[i].resp, c->recv.len) == 0);
+    c->recv.len = 0;
+  }
+  ASSERT(total == num_tests);
+  mg_mgr_free(&mgr);
+}
+
 int main(void) {
   const char *debug_level = getenv("V");
   if (debug_level == NULL) debug_level = "3";
   mg_log_set(atoi(debug_level));
+
+  s_error = false;
+  test_modbus();
+  DASHBOARD("modbus");
 
   s_error = false;
   test_crypto();
@@ -4197,7 +4575,7 @@ int main(void) {
   s_error = false;
   test_mqtt();  // sorry, MQTT_LOCALHOST is also skipped
   DASHBOARD("mqtt");
-#else 
+#else
   (void) test_mqtt;
 #endif
 
