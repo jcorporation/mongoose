@@ -3,7 +3,9 @@
 #if MG_ARCH == MG_ARCH_CUBE
 
 #include <ctype.h>
+#if !defined(MG_ENABLE_LWIP) || !MG_ENABLE_LWIP
 #include <errno.h>
+#endif
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -27,16 +29,15 @@
 #define MG_ENABLE_DIRLIST 0
 #endif
 
-#ifndef MG_ENABLE_SOCKET
-#define MG_ENABLE_SOCKET 0
-#endif
 
 #ifndef MG_ENABLE_TCPIP
 #define MG_ENABLE_TCPIP 1  // Enable built-in TCP/IP stack
 #endif
 
 #if MG_ENABLE_TCPIP && !defined(MG_ENABLE_DRIVER_STM32F) && \
-    !defined(MG_ENABLE_DRIVER_STM32H) && !defined(MG_ENABLE_DRIVER_STM32N)
+    !defined(MG_ENABLE_DRIVER_STM32H) && !defined(MG_ENABLE_DRIVER_STM32N) && \
+    !defined(MG_ENABLE_DRIVER_CYW) && !defined(MG_ENABLE_DRIVER_CYW_SDIO) && \
+    !defined(MG_ENABLE_DRIVER_ST67W6)
 #if defined(STM32F1) || defined(STM32F2) || defined(STM32F4) || defined(STM32F7)
 #define MG_ENABLE_DRIVER_STM32F 1
 #elif defined(STM32H5) || defined(STM32H7)

@@ -209,7 +209,7 @@ jobs:
         cat log
         test/health.awk < log > json
         scp -o "StrictHostKeyChecking=no" json "root@176.9.217.245:/data/downloads/health/windows_${{ matrix.target }}_${{ matrix.cc }}_${{ matrix.ssl }}_${{ matrix.select }}_$(date +"%Y%m%d").json"
- 
+
   arm:
     runs-on: ubuntu-latest
     strategy:
@@ -325,23 +325,22 @@ jobs:
           - path: nxp/rt1020-evk-make-baremetal-builtin
           - path: nxp/rt1060-evk-make-baremetal-builtin
           - path: nxp/rt1170-evk-make-baremetal-builtin
-          - path: pico-sdk/pico-w-picosdk-baremetal-builtin
-          - path: pico-sdk/pico-2-w-picosdk-baremetal-builtin
-          - path: pico-sdk/w5500-evb-pico-picosdk-baremetal-builtin
-          - path: pico-sdk/w5500-evb-pico2-picosdk-baremetal-builtin
-          - path: pico-sdk/w55rp20-evb-pico-picosdk-baremetal-builtin
-          - path: stm32/nucleo-f429zi-make-baremetal-builtin
-          - path: stm32/nucleo-f429zi-make-freertos-builtin
-          - path: stm32/nucleo-f746zg-make-baremetal-builtin
-          - path: stm32/nucleo-f746zg-make-freertos-builtin
-          - path: stm32/nucleo-h563zi-make-baremetal-builtin
-          - path: stm32/nucleo-h563zi-make-freertos-builtin
-          - path: stm32/nucleo-h723zg-make-baremetal-builtin
-          - path: stm32/nucleo-h723zg-make-freertos-builtin
-          - path: stm32/nucleo-h743zi-make-baremetal-builtin
-          - path: stm32/nucleo-h743zi-make-freertos-builtin
-          - path: stm32/stm32h573i-dk-make-baremetal-builtin
-          - path: stm32/stm32h573i-dk-make-freertos-builtin
+          - path: rp/pico-w
+          - path: rp/w5500-evb-pico
+          - path: rp/w55rp20-evb-pico
+          - path: rp/pico-rndis
+          - path: stm32/nucleo-f429zi/minimal
+          - path: stm32/nucleo-f746zg/minimal
+          - path: stm32/nucleo-f746zg/minimal-pppoe
+          - path: stm32/nucleo-f756zg/minimal
+          - path: stm32/nucleo-h563zi/minimal
+          - path: stm32/nucleo-h723zg/minimal
+          - path: stm32/nucleo-h743zi/minimal
+          - path: stm32/nucleo-n657x0-q/minimal
+          - path: stm32/nucleo-u5a5zj-q/minimal
+          - path: stm32/portenta-h7/minimal
+          - path: stm32/stm32h573i-dk/minimal
+          - path: stm32/stm32h747i-disco/minimal
           - path: ti/ek-tm4c1294xl-make-baremetal-builtin
           - path: ti/ek-tm4c1294xl-make-freertos-builtin
     name: ${{ matrix.example.path }}
@@ -371,7 +370,7 @@ jobs:
         with: { fetch-depth: 2 }
       - run: echo # nothing specific to install or do
       - run: make -C tutorials/${{ matrix.example.path }} build
-  
+
   generic_examples_arm:
     runs-on: ubuntu-latest
     strategy:
@@ -397,13 +396,12 @@ jobs:
           - path: nxp/nxp-lpcxpresso54628-lwip-freertos
           - path: nxp/nxp-twrk65f180m-lwip-freertos
           - path: nxp/nxp-twrkv58f220m-lwip-freertos
-          - path: pico-sdk/rm2-pico-picosdk-baremetal-builtin
-          - path: pico-sdk/pico-rmii
-          - path: stm32/nucleo-f429zi-make-baremetal-builtin-rndis
-          - path: stm32/rm2-nucleo-f429zi-make-baremetal-builtin
-          - path: stm32/nucleo-f746zg-make-baremetal-builtin-rndis
-          - path: stm32/rm2-nucleo-f746zg-make-baremetal-builtin
-          - path: stm32/nucleo-g031-make-baremetal-builtin
+          - path: rp/pico-rmii
+          - path: stm32/nucleo-f746zg/minimal-rm2
+          - path: stm32/nucleo-f746zg/minimal-rndis
+          - path: stm32/nucleo-f429zi/minimal-rm2
+          - path: stm32/nucleo-f429zi/minimal-rndis
+          - path: stm32/nucleo-g031k8/minimal-w5500
           - path: ti/ti-ek-tm4c1294xl-http-server
           - path: ti/ek-tm4c1294xl-make-baremetal-builtin-rndis
     name: ${{ matrix.example.path }}
@@ -440,11 +438,6 @@ jobs:
           - path: nxp/rt1060-evk-make-freertos-builtin
           - path: nxp/rt1170-evk-make-freertos-builtin
           - path: renesas/ek-ra6m4-make-baremetal-builtin
-          - path: pico-sdk/pico-rndis-dashboard
-          - path: pico-sdk/pico-w-picosdk-freertos-lwip
-          - path: pico-sdk/pico-2-w-picosdk-freertos-lwip
-          - path: stm32/nucleo-f746zg-make-freertos-tcp
-          - path: stm32/nucleo-f746zg-make-baremetal-builtin-cmsis_driver
     name: ${{ matrix.example.path }} ${{ matrix.ssl }}
     steps:
       - uses: actions/checkout@v4
@@ -458,35 +451,22 @@ jobs:
 #      fail-fast: false
 #      matrix:
 #        example:
-#          - path: 
+#          - path:
 #    name: ${{ matrix.example.path }}
 #    steps:
 #      - uses: actions/checkout@v4
 #        with: { fetch-depth: 2 }
 #      - run: echo # nothing specific to install or do
 #      - run: make -C tutorials/${{ matrix.example.path }} build
-      
-  mqtt_dashboard_examples_arm:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        example:
-          - path: pico-sdk/pico-rndis-device
-    name: ${{ matrix.example.path }}
-    steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 2 }
-      - run: sudo apt -y update && sudo apt -y install gcc-arm-none-eabi
-      - run: make -C tutorials/${{ matrix.example.path }} build
-      
+
+
 #  dual_examples:
 #    runs-on: ubuntu-latest
 #    strategy:
 #      fail-fast: false
 #      matrix:
 #        example:
-#          - path: 
+#          - path:
 #    name: ${{ matrix.example.path }}
 #    steps:
 #      - uses: actions/checkout@v4

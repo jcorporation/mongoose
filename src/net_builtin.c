@@ -32,7 +32,6 @@ struct connstate {
 #define MIP_TTYPE_SYN 3        // SYN sent, waiting for response
 #define MIP_TTYPE_FIN 4  // FIN sent, waiting until terminating the connection
   uint8_t tmiss;         // Number of keep-alive misses
-  struct mg_iobuf raw;   // For TLS only. Incoming raw data
   bool fin_rcvd;         // We have received FIN from the peer
   bool twclosure;        // 3-way closure done
 };
@@ -210,14 +209,15 @@ uint8_t mg_l2_ip6put(enum mg_l2type type, uint8_t *addr, uint8_t *opts);
 bool mg_l2_poll(struct mg_tcpip_if *ifp, bool expired_1000ms);
 
 static void mg_tcpip_call(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
-#if MG_ENABLE_PROFILE
+#if 0 && MG_ENABLE_PROFILE
   const char *names[] = {"TCPIP_EV_ST_CHG",        "TCPIP_EV_DHCP_DNS",
                          "TCPIP_EV_DHCP_SNTP",     "TCPIP_EV_ARP",
                          "TCPIP_EV_TIMER_1S",      "TCPIP_EV_WIFI_SCAN_RESULT",
                          "TCPIP_EV_WIFI_SCAN_END", "TCPIP_EV_WIFI_CONNECT_ERR",
-                         "TCPIP_EV_DRIVER",        "TCPIP_EV_USER"};
-  if (ev != MG_TCPIP_EV_POLL && ev < (int) (sizeof(names) / sizeof(names[0]))) {
-    MG_PROF_ADD(c, names[ev]);
+                         "TCPIP_EV_DRIVER",        "MG_TCPIP_EV_ST6_CHG",
+                         "TCPIP_EV_USER"};
+  if (ev != MG_TCPIP_EV_TIMER_1S && ev < (int) (sizeof(names) / sizeof(names[0]))) {
+    MG_PROF_ADD(ifp, names[ev]); // TODO(): call MG_PROF_DUMP() MG_PROF_FREE()
   }
 #endif
   // Fire protocol handler first, user handler second. See #2559
@@ -2166,8 +2166,8 @@ static void init_closure(struct mg_connection *c) {
 
 static void close_conn(struct mg_connection *c) {
   struct connstate *s = (struct connstate *) (c + 1);
-  mg_iobuf_free(&s->raw);  // For TLS connections, release raw data
   mg_close_conn(c);
+  (void) s;
 }
 
 static bool can_write(struct mg_connection *c) {
