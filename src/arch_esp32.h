@@ -17,8 +17,10 @@
 #include <sys/types.h>
 #include <time.h>
 
-#include <esp_ota_ops.h>  // Use angle brackets to avoid
-#include <esp_timer.h>    // amalgamation ditching them
+#include <esp_ota_ops.h>   // Use angle brackets to avoid
+#include <esp_timer.h>     // amalgamation ditching them
+#include <esp_system.h>
+#include <esp_mac.h>
 
 #define MG_PATH_MAX 128
 

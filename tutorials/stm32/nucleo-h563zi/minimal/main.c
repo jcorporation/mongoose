@@ -17,10 +17,8 @@
 #define LED_2 PIN('F', 4)  // On-board LED pin (yellow)
 #define LED_3 PIN('G', 4)  // On-board LED pin (red)
 
-// Redirect stdout debug output to UART
-int _write(int fd, char *ptr, int len) {
-  if (fd == 1 || fd == 2) hal_uart_write_buf(UART_DEBUG, ptr, (size_t) len);
-  return len;
+static void log_fn(char ch, void *param) {
+  hal_uart_write_buf(param, &ch, 1);
 }
 
 static void blink_task(void) {
@@ -43,26 +41,48 @@ bool mg_random(void *buf, size_t len) {
 }
 
 static void http_ev_handler(struct mg_connection *c, int ev, void *ev_data) {
-  if (ev == MG_EV_HTTP_MSG) {  // New HTTP request received
+  if (ev == MG_EV_HTTP_HDRS) {
+    struct mg_http_message *hm = (struct mg_http_message *) ev_data;
+    // Start OTA on headers so body chunks stream directly to flash (no RAM buffer)
+    if (mg_match(hm->uri, mg_str("/api/ota/update"), NULL)) {
+      mg_http_start_ota(c, hm, NULL);
+    }
+  } else if (ev == MG_EV_HTTP_MSG) {
     struct mg_http_message *hm = (struct mg_http_message *) ev_data;
     if (mg_match(hm->uri, mg_str("/api/tick"), NULL)) {
       mg_http_reply(c, 200, "", "{%m:%llu}\n", MG_ESC("tick"), hal_get_tick());
+    } else if (mg_match(hm->uri, mg_str("/api/ota/commit"), NULL)) {
+      c->data[0] = 1;
+      mg_http_reply(c, 200, "", "ok\n");
+    } else if (mg_match(hm->uri, mg_str("/api/ota/rollback"), NULL)) {
+      c->data[0] = 2;
+      mg_http_reply(c, 200, "", "ok\n");
     } else {
       mg_http_reply(c, 200, "", "Hi from Mongoose, tick %llu\n", hal_get_tick());
     }
+  } else if (ev == MG_EV_CLOSE && c->data[0] == 1) {
+    MG_OTA_STATE_SET(MG_OTA_CONFIRMED);
+    NVIC_SystemReset();
+  } else if (ev == MG_EV_CLOSE && c->data[0] == 2) {
+    MG_OTA_STATE_SET(MG_OTA_CONFIRMED);
+    MG_OTA_ROLLBACK();
   }
 }
 
 int main(void) {
+  hal_clock_init();
   hal_uart_init(UART_DEBUG, UART_DEBUG_TX_PIN, UART_DEBUG_RX_PIN, 115200);
+  mg_log_set_fn(log_fn, UART_DEBUG);
+
+  MG_OTA_BOOT_CHECK();  // Must be called after clock init
+
   hal_rng_init();
   hal_gpio_output(LED_1);
   hal_gpio_output(LED_2);
   hal_gpio_output(LED_3);
-
   hal_ethernet_init();
+  MG_INFO(("Initialised. CPU clock: %lu MHz", SystemCoreClock / 1000000));
 
-  // Start a minimal web server
   struct mg_mgr mgr;
   mg_mgr_init(&mgr);
   mg_http_listen(&mgr, "http://0.0.0.0", http_ev_handler, NULL);

@@ -37,6 +37,11 @@ static struct mg_flash s_mg_flash_stm32h7 = {
 
 #define IS_DUALCORE() (MG_OTA == MG_OTA_STM32H7_DUAL_CORE)
 
+MG_IRAM static size_t flash_size(void) {
+  size_t size = MG_REG(FLASH_SIZE_REG) * 1024;
+  return IS_DUALCORE() ? size / 2 : size;
+}
+
 MG_IRAM static bool is_dualbank(void) {
   if (IS_DUALCORE()) {
     // H745/H755 and H747/H757 are running on dual core.
@@ -112,6 +117,7 @@ MG_IRAM static bool mg_stm32h7_erase(void *addr) {
     MG_REG(bank + FLASH_CR) |= (sector & 7U) << 8U;  // Sector to erase
     MG_REG(bank + FLASH_CR) |= MG_BIT(2);            // Sector erase bit
     MG_REG(bank + FLASH_CR) |= MG_BIT(7);            // Start erasing
+    flash_wait(bank);
     ok = !flash_is_err(bank);
     MG_DEBUG(("Erase sector %lu @ %p %s. CR %#lx SR %#lx", sector, addr,
               ok ? "ok" : "fail", MG_REG(bank + FLASH_CR),
@@ -121,21 +127,36 @@ MG_IRAM static bool mg_stm32h7_erase(void *addr) {
   return ok;
 }
 
+MG_IRAM static void single_bank_swap(char *p1, char *p2, size_t s, size_t ss);
+
+static bool s_flash_irq_disabled;
+
 MG_IRAM static bool mg_stm32h7_swap(void) {
-  if (!is_dualbank()) return true;
+  s_mg_flash_stm32h7.size = flash_size();
+  if (!is_dualbank()) {
+    // True sector-by-sector swap using the last sector of the second half as
+    // scratch. Resets inside single_bank_swap, never returns.
+    size_t ss = s_mg_flash_stm32h7.secsz;
+    char *p1 = (char *) s_mg_flash_stm32h7.start;
+    char *p2 = p1 + s_mg_flash_stm32h7.size / 2;
+    size_t s = s_mg_flash_stm32h7.size / 2 - ss;
+    MG_INFO(("Swapping partitions, %u bytes (%u sectors)", s, s / ss));
+    MG_INFO(("Do NOT power off..."));
+    MG_OTA_ROLLBACK_TIMER_FEED();
+    mg_log_level = MG_LL_NONE;
+    s_flash_irq_disabled = true;
+    single_bank_swap(p1, p2, s, ss);
+    return true;  // unreachable
+  }
   uint32_t bank = FLASH_BASE1;
   uint32_t desired = flash_bank_is_swapped(bank) ? 0 : MG_BIT(31);
   flash_unlock();
   flash_clear_err(bank);
-  // printf("OPTSR_PRG 1 %#lx\n", FLASH->OPTSR_PRG);
   MG_SET_BITS(MG_REG(bank + FLASH_OPTSR_PRG), MG_BIT(31), desired);
-  // printf("OPTSR_PRG 2 %#lx\n", FLASH->OPTSR_PRG);
   MG_REG(bank + FLASH_OPTCR) |= MG_BIT(1);  // OPTSTART
   while ((MG_REG(bank + FLASH_OPTSR_CUR) & MG_BIT(31)) != desired) (void) 0;
   return true;
 }
-
-static bool s_flash_irq_disabled;
 
 MG_IRAM static bool mg_stm32h7_write(void *addr, const void *buf, size_t len) {
   if ((len % s_mg_flash_stm32h7.align) != 0) {
@@ -162,32 +183,43 @@ MG_IRAM static bool mg_stm32h7_write(void *addr, const void *buf, size_t len) {
     if (flash_is_err(bank)) ok = false;
   }
   if (!s_flash_irq_disabled) MG_ARM_ENABLE_IRQ();
-  MG_DEBUG(("Flash write %lu bytes @ %p: %s. CR %#lx SR %#lx", len, dst,
+  MG_DEBUG(("Flash write %lu bytes @ %p: %s. CR %#lx SR %#lx", len, addr,
             ok ? "ok" : "fail", MG_REG(bank + FLASH_CR),
             MG_REG(bank + FLASH_SR)));
   MG_REG(bank + FLASH_CR) &= ~MG_BIT(1);  // Clear programming flag
   return ok;
 }
 
-// just overwrite instead of swap
+// True sector-by-sector exchange between first half [p1..p1+s) and second half
+// [p2..p2+s), using the sector at p2+s as scratch. Runs from RAM. Resets on
+// completion. Symmetric: calling twice returns flash to original state.
 MG_IRAM static void single_bank_swap(char *p1, char *p2, size_t s, size_t ss) {
-  // no stdlib calls here
+  char *scratch = p2 + s;  // Last sector of second half, reserved as scratch
   for (size_t ofs = 0; ofs < s; ofs += ss) {
-    mg_stm32h7_write(p1 + ofs, p2 + ofs, ss);
+    MG_OTA_ROLLBACK_TIMER_FEED();
+    mg_stm32h7_write(scratch, p1 + ofs, ss);   // Save p1[i] to scratch
+    MG_OTA_ROLLBACK_TIMER_FEED();
+    mg_stm32h7_write(p1 + ofs, p2 + ofs, ss);  // Copy p2[i] to p1[i]
+    MG_OTA_ROLLBACK_TIMER_FEED();
+    mg_stm32h7_write(p2 + ofs, scratch, ss);   // Copy scratch to p2[i]
   }
-  *(volatile unsigned long *) 0xe000ed0c = 0x5fa0004;
+  *(volatile uint32_t *) 0xe000ed0cU = 0x5fa0004U;  // NVIC_SystemReset()
 }
 
 bool mg_ota_begin(size_t new_firmware_size) {
-  s_mg_flash_stm32h7.size = MG_REG(FLASH_SIZE_REG) * 1024;
-  if (IS_DUALCORE()) {
-    // Using only the 1st bank (mapped to CM7)
-    s_mg_flash_stm32h7.size /= 2;
-  }
+  s_mg_flash_stm32h7.size = flash_size();
 #ifdef __ZEPHYR__
-  *((uint32_t *)0xE000ED94) = 0;
-  MG_DEBUG(("Jailbreak %s", *((uint32_t *)0xE000ED94) == 0 ? "successful" : "failed"));
+  *((uint32_t *) 0xE000ED94) = 0;
+  MG_DEBUG(("Jailbreak %s", *((uint32_t *) 0xE000ED94) == 0 ? "ok" : "failed"));
 #endif
+  if (!is_dualbank()) {
+    // Last sector of the second half is reserved as swap scratch; enforce limit.
+    size_t max = s_mg_flash_stm32h7.size / 2 - s_mg_flash_stm32h7.secsz;
+    if (new_firmware_size > max) {
+      MG_ERROR(("Firmware %lu too big for single-bank OTA, max %lu", new_firmware_size, max));
+      return false;
+    }
+  }
   return mg_ota_flash_begin(new_firmware_size, &s_mg_flash_stm32h7);
 }
 
@@ -199,22 +231,11 @@ bool mg_ota_end(void) {
   if (mg_ota_flash_end(&s_mg_flash_stm32h7)) {
     if (is_dualbank()) {
       // Bank swap is deferred until reset, been executing in flash, reset
-      *(volatile unsigned long *) 0xe000ed0c = 0x5fa0004;
-    } else {
-      // Swap partitions. Pray power does not go away
-      MG_INFO(("Swapping partitions, size %u (%u sectors)",
-               s_mg_flash_stm32h7.size,
-               s_mg_flash_stm32h7.size / s_mg_flash_stm32h7.secsz));
-      MG_INFO(("Do NOT power off..."));
-      mg_log_level = MG_LL_NONE;
-      s_flash_irq_disabled = true;
-      // Runs in RAM, will reset when finished
-      single_bank_swap(
-          (char *) s_mg_flash_stm32h7.start,
-          (char *) s_mg_flash_stm32h7.start + s_mg_flash_stm32h7.size / 2,
-          s_mg_flash_stm32h7.size / 2, s_mg_flash_stm32h7.secsz);
+      *(volatile uint32_t *) 0xe000ed0cU = 0x5fa0004U;  // NVIC_SystemReset()
     }
   }
   return false;
 }
+
+struct mg_flash *mg_flash = &s_mg_flash_stm32h7;
 #endif

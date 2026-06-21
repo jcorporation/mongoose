@@ -472,7 +472,7 @@ static void mqtt_cb(struct mg_connection *c, int ev, void *ev_data) {
     memset(&opts, 0, sizeof(opts));
     opts.ca = MQTTS_CA;
 #if defined(MQTT_LOCALHOST) && MG_TLS != MG_TLS_BUILTIN
-    MG_ERROR(("Hostname not tested"));
+    printf("\nHostname not tested\n");
 #else
     opts.name = mg_url_host(MQTTS_URL);
 #endif
@@ -622,7 +622,7 @@ static void test_mqtt_basic(void) {
   // Connect with empty client ID, no options, ergo MQTT = 3.1.1
   mg_mgr_init(&mgr);
   c = mg_mqtt_connect(&mgr, url, NULL, mqtt_cb, &test_data);
-  for (i = 0; i < 300 && mbuf[0] == 0; i++) mg_mgr_poll(&mgr, 10);
+  for (i = 0; i < 1000 && mbuf[0] == 0; i++) mg_mgr_poll(&mgr, 10);
   if (mbuf[0] != 'X') MG_INFO(("[%s]", mbuf));
   ASSERT(mbuf[0] == 'X');
   ASSERT(test_data.flags == 0);
@@ -711,7 +711,7 @@ static void test_mqtt_ver(uint8_t mqtt_version) {
   opts.message = mg_str("mg_will_messsage");
   opts.client_id = genstring(client_id, sizeof(client_id));
   c = mg_mqtt_connect(&mgr, url, &opts, mqtt_cb, &test_data);
-  for (i = 0; i < 500 && mbuf[0] == 0; i++) mg_mgr_poll(&mgr, 10);
+  for (i = 0; i < 1000 && mbuf[0] == 0; i++) mg_mgr_poll(&mgr, 10);
   if (mbuf[0] != 'X') MG_INFO(("[%s]", mbuf));
   ASSERT(mbuf[0] == 'X');
   ASSERT(test_data.flags == 0);
@@ -802,7 +802,7 @@ static void test_mqtt_parse(void) {
 static void test_mqtt(void) {
   test_mqtt_base();
 #ifdef NO_MQTT_TESTS
-  MG_ERROR(("MQTT tests skipped on request"));
+  printf("\nMQTT tests skipped on request\n");
   (void) test_mqtt_basic, (void) test_mqtt_ver;
 #else
   test_mqtt_parse();
@@ -1501,8 +1501,7 @@ static void test_tls(void) {
     ASSERT(cmpbody(buf, data.buf) == 0);  // "thefile" links to Makefile
     ASSERT(system("killall tls_multirec/server") == 0);
   } else {
-    MG_ERROR(
-        ("SKIPPED TLS MULTIPLE RECORDS TEST, tls_multirec/server NOT PRESENT"));
+    printf("\nSKIPPED TLS MULTIPLE RECORDS TEST, tls_multirec/server NOT PRESENT\n");
   }
 #else
   printf(
@@ -1572,13 +1571,9 @@ static void test_http_client(void) {
   ASSERT(ok == 301 || ok == 200);
   mg_mgr_poll(&mgr, 0);
   ok = 0;
-#if MG_TLS && MG_TLS != MG_TLS_BUILTIN
+#if MG_TLS
   url = "https://cesanta.com";
   opts.name = mg_url_host(url);
-#if MG_TLS == MG_TLS_BUILTIN
-  // our TLS does not search for the proper CA in a bundle
-  opts.ca = mg_file_read(&mg_fs_posix, "data/e8.crt");
-#endif
   c = mg_http_connect(&mgr, url, f3, &ok);
   ASSERT(c != NULL);
   mg_tls_init(c, &opts);
@@ -1608,9 +1603,6 @@ static void test_http_client(void) {
   ASSERT(ok == 200);
   mg_mgr_poll(&mgr, 1);
   opts.name = mg_url_host(url);
-#if MG_TLS == MG_TLS_BUILTIN
-  mg_free((void *) opts.ca.buf);
-#endif
 
   // Test empty CA
   // Disable mbedTLS: https://github.com/Mbed-TLS/mbedtls/issues/7075
@@ -2983,6 +2975,29 @@ static void uc(struct mg_connection *c, int ev, void *ev_data) {
   }
 }
 
+static int s_su_done;
+
+static void su_cb(struct mg_connection *c, const char *errmsg) {
+  s_su_done = errmsg ? -1 : 1;
+  mg_http_reply(c, errmsg ? 400 : 200, "", errmsg ? errmsg : "ok\n");
+  c->is_draining = 1;
+}
+
+static void su(struct mg_connection *c, int ev, void *ev_data) {
+  if (ev == MG_EV_HTTP_HDRS) {
+    struct mg_http_message *hm = (struct mg_http_message *) ev_data;
+    struct mg_str name = mg_str_n(hm->uri.buf + 1, hm->uri.len - 1);
+    mg_http_start_upload(c, hm, name, mg_str("."), &mg_fs_posix, su_cb);
+  }
+}
+
+static void cu(struct mg_connection *c, int ev, void *ev_data) {
+  if (ev == MG_EV_CONNECT)
+    mg_printf(c, "POST %s HTTP/1.0\r\nContent-Length: 8\r\n\r\nfoo\nbar\n",
+              (char *) c->fn_data);
+  (void) ev_data;
+}
+
 static void test_http_upload(void) {
   struct mg_mgr mgr;
   const char *url = "http://127.0.0.1:12352";
@@ -2996,6 +3011,36 @@ static void test_http_upload(void) {
   ASSERT(s == NULL);
   mg_mgr_free(&mgr);
   ASSERT(mgr.conns == NULL);
+
+  // mg_http_start_upload: successful upload, file content verified
+  {
+    char buf[FETCH_BUF_SIZE];
+    struct mg_str fc;
+    remove("su_ok.txt");
+    mg_mgr_init(&mgr);
+    mg_http_listen(&mgr, "http://127.0.0.1:12355", su, NULL);
+    ASSERT(fetch(&mgr, buf, "http://127.0.0.1:12355",
+                 "POST /su_ok.txt HTTP/1.0\r\nContent-Length: 8\r\n\r\nfoo\nbar\n") ==
+           200);
+    fc = mg_file_read(&mg_fs_posix, "su_ok.txt");
+    ASSERT(mg_strcmp(fc, mg_str("foo\nbar\n")) == 0);
+    mg_free((void *) fc.buf);
+    remove("su_ok.txt");
+    mg_mgr_free(&mgr);
+    ASSERT(mgr.conns == NULL);
+  }
+
+  // mg_http_start_upload: path traversal rejected, callback gets error
+  {
+    s_su_done = 0;
+    mg_mgr_init(&mgr);
+    mg_http_listen(&mgr, "http://127.0.0.1:12356", su, NULL);
+    mg_http_connect(&mgr, "http://127.0.0.1:12356", cu, (void *) "/../evil.txt");
+    for (i = 0; i < 50 && !s_su_done; i++) mg_mgr_poll(&mgr, 5);
+    ASSERT(s_su_done == -1);
+    mg_mgr_free(&mgr);
+    ASSERT(mgr.conns == NULL);
+  }
 }
 
 #define LONG_CHUNK "chunk with length taking up more than two hex digits"
@@ -4144,44 +4189,77 @@ static void dash_custom(struct mg_connection *c, int ev, void *ev_data) {
   (void) c, (void) ev, (void) ev_data;
 }
 
-static int dash_authenticate(const char *user, const char *pass) {
+static int dash_authenticate(char *user, size_t userlen, const char *pass) {
   int level = 0;
   if (strcmp(pass, "admin") == 0) {
     level = 7;
   } else if (strcmp(pass, "user") == 0) {
     level = 3;
   }
-  (void) user;
+  (void) user, (void) userlen;
   return level;
 }
 
 struct dash_ws_test {
-  const char *req;
+  int opened;
   int done;
-  int result;
   int saw_set3;
 };
+
+struct dash_arr_ws_test {
+  int opened;
+  int done;
+  int saw_arr_index;  // index seen in "arr/INDEX" change key, -1 if not seen
+  int saw_arr_val;    // "val" seen in the change params, -1 if not seen
+  int saw_arr_size;   // size seen in a plain "arr":N change, -1 if not seen
+};
+
+static void dash_arr_ws_cb(struct mg_connection *c, int ev, void *ev_data) {
+  struct dash_arr_ws_test *d = (struct dash_arr_ws_test *) c->fn_data;
+  if (ev == MG_EV_WS_OPEN) {
+    d->opened = 1;
+  } else if (ev == MG_EV_WS_MSG) {
+    struct mg_ws_message *wm = (struct mg_ws_message *) ev_data;
+    struct mg_str method = mg_json_get_tok(wm->data, "$.method");
+    if (mg_strcmp(method, mg_str("\"change\"")) == 0) {
+      // Check for "arr/INDEX" (element change) or "arr":N (size change)
+      const char *p = wm->data.buf;
+      const char *end = p + wm->data.len;
+      while (p < end - 6) {
+        if (strncmp(p, "\"arr/", 5) == 0) {
+          const char *v;
+          p += 5;
+          d->saw_arr_index = (int) strtol(p, NULL, 10);
+          v = strstr(p, "\"val\":");
+          if (v != NULL) d->saw_arr_val = (int) strtol(v + 6, NULL, 10);
+          d->done = 1;
+          c->is_closing = 1;
+          break;
+        }
+        if (strncmp(p, "\"arr\":", 6) == 0) {
+          d->saw_arr_size = (int) strtol(p + 6, NULL, 10);
+          d->done = 1;
+          c->is_closing = 1;
+          break;
+        }
+        p++;
+      }
+    }
+  } else if (ev == MG_EV_CLOSE && d->done == 0) {
+    d->done = -1;
+  }
+}
 
 static void dash_ws_cb(struct mg_connection *c, int ev, void *ev_data) {
   struct dash_ws_test *d = (struct dash_ws_test *) c->fn_data;
   if (ev == MG_EV_WS_OPEN) {
-    if (d->req != NULL) {
-      mg_ws_send(c, d->req, strlen(d->req), WEBSOCKET_OP_TEXT);
-    }
+    d->opened = 1;
   } else if (ev == MG_EV_WS_MSG) {
     struct mg_ws_message *wm = (struct mg_ws_message *) ev_data;
     struct mg_str method = mg_json_get_tok(wm->data, "$.method");
     struct mg_str set3 = mg_json_get_tok(wm->data, "$.params.set3");
-    double result = 0;
     if (mg_strcmp(method, mg_str("\"change\"")) == 0 && set3.buf != NULL) {
       d->saw_set3 = 1;
-    }
-    if (mg_json_get_num(wm->data, "$.result", &result)) {
-      d->result = (int) result;
-      d->done = 1;
-      c->is_closing = 1;
-    } else if (d->req == NULL &&
-               mg_strcmp(method, mg_str("\"ready\"")) == 0) {
       d->done = 1;
       c->is_closing = 1;
     }
@@ -4192,8 +4270,89 @@ static void dash_ws_cb(struct mg_connection *c, int ev, void *ev_data) {
 
 char three[10] = "hi";
 int one = 1;
-static void rfields1(void) {
-  mg_snprintf(three, sizeof(three), "t: %d", one);  // Simulate array
+
+#define TEST_ARR_SIZE 17
+#define TEST_ARR_CAP (TEST_ARR_SIZE + 2)  // Cap for MG_DASH_ADD tests
+#define TEST_ARR_RO_INDEX 3  // This element is read-only: WRITE is always denied
+static int s_arr_index;
+static int s_arr_val;
+static int s_arr_store[TEST_ARR_CAP];  // Backing store, init to squares
+static int s_arr_count = TEST_ARR_SIZE;  // Logical size, grows via MG_DASH_ADD
+
+static bool set1_fn(enum mg_dash_op op, struct mg_dash_user *u) {
+  if (u->level < 3) return false;
+  if (op == MG_DASH_READ) {
+    mg_snprintf(three, sizeof(three), "t: %d", one);
+    return true;
+  }
+  return u->level >= 7;
+}
+static bool set2_fn(enum mg_dash_op op, struct mg_dash_user *u) {
+  (void) u; return op == MG_DASH_READ;
+}
+static bool set3_fn(enum mg_dash_op op, struct mg_dash_user *u) {
+  if (u->level < 7) return false;
+  return op == MG_DASH_READ || op == MG_DASH_WRITE;
+}
+static bool test_upload_dir(const struct mg_dash_user *u, char *buf, size_t len) {
+  (void) u;
+#if MG_ARCH == MG_ARCH_UNIX || MG_ARCH == MG_ARCH_WIN32
+  mkdir("/tmp/mongoose_dash_test", 0755);
+#endif
+  mg_snprintf(buf, len, "%s", "/tmp/mongoose_dash_test");
+  return true;
+}
+
+struct test_file_entry {
+  char name[64];
+  size_t size;
+};
+static struct test_file_entry s_test_file;
+static int s_test_file_index;
+static struct mg_field test_files_fields[] = {
+    {"name", MG_VAL_STR, s_test_file.name, sizeof(s_test_file.name)},
+    {"size", MG_VAL_UINT64, &s_test_file.size, 0},
+    {NULL, MG_VAL_INT, NULL, 0},
+};
+static struct mg_field_set test_files_set = {
+    "files", test_files_fields, NULL, &s_test_file_index, test_upload_dir, NULL};
+static struct test_file_entry s_delete_file;
+static char s_deleted_file[sizeof(s_delete_file.name)];
+static char s_uploaded_file[sizeof(s_delete_file.name)];
+static struct mg_field_set *s_delete_file_set;
+static bool delete_file_fn(enum mg_dash_op op, struct mg_dash_user *u) {
+  if (op == MG_DASH_READ) return mg_dash_dir_read(s_delete_file_set, u);
+  if (op == MG_DASH_WRITE) {
+    mg_snprintf(s_uploaded_file, sizeof(s_uploaded_file), "%s",
+                s_delete_file.name);
+  }
+  if (op == MG_DASH_DELETE) {
+    mg_snprintf(s_deleted_file, sizeof(s_deleted_file), "%s",
+                s_delete_file.name);
+  }
+  return true;
+}
+static bool arr_fn(enum mg_dash_op op, struct mg_dash_user *u) {
+  (void) u;
+  if (op == MG_DASH_READ) {
+    if (s_arr_index < 0) { s_arr_index = s_arr_count; return true; }
+    if (s_arr_index >= s_arr_count) { s_arr_index = -1; return true; }
+    s_arr_val = s_arr_store[s_arr_index];
+    return true;
+  }
+  if (op == MG_DASH_WRITE) {
+    if (s_arr_index < 0 || s_arr_index >= s_arr_count) return false;
+    if (s_arr_index == TEST_ARR_RO_INDEX) return false;  // Deny: read-only
+    s_arr_store[s_arr_index] = s_arr_val;
+    return true;
+  }
+  if (op == MG_DASH_ADD) {
+    if (s_arr_count >= TEST_ARR_CAP) return false;  // Deny: cap reached
+    s_arr_store[s_arr_count++] = s_arr_val;
+    return true;
+  }
+  if (op == MG_DASH_DELETE) return s_arr_index < s_arr_count;
+  return false;
 }
 
 static void test_dash(void) {
@@ -4202,7 +4361,7 @@ static void test_dash(void) {
   const char *ws_url = "ws://localhost:26352/api/websocket";
   struct mg_mgr mgr;
   struct mg_dash dash;
-  struct dash_ws_test ws_user, ws_admin, ws_user_notify;
+  struct dash_ws_test ws_admin, ws_user_notify;
   bool two = false;
   int admin = 7;
   int i;
@@ -4219,13 +4378,20 @@ static void test_dash(void) {
       {"admin", MG_VAL_INT, &admin, sizeof(admin)},
       {NULL, MG_VAL_INT, NULL, 0},
   };
-  struct mg_field_set set1 = {"set1", fields1, rfields1, NULL, 3, 7, NULL};
-  struct mg_field_set set2 = {"set2", fields2, NULL, NULL, 0, 0, NULL};
-  struct mg_field_set set3 = {"set3", fields3, NULL, NULL, 7, 7, NULL};
+  struct mg_field_set set1 = {"set1", fields1, set1_fn, NULL, NULL, NULL};
+  struct mg_field_set set2 = {"set2", fields2, set2_fn, NULL, NULL, NULL};
+  struct mg_field_set set3 = {"set3", fields3, set3_fn, NULL, NULL, NULL};
+  struct mg_field arr_fields[] = {
+      {"val", MG_VAL_INT, &s_arr_val, sizeof(s_arr_val)},
+      {NULL, MG_VAL_INT, NULL, 0},
+  };
+  struct mg_field_set arr_set = {"arr", arr_fields, arr_fn, &s_arr_index, NULL,
+                                 NULL};
   const char *get_all_expected =
-      "{\"files\":{\"data\":[]},\"set3\":{\"admin\":7},"
+      "{\"arr\":17,\"set3\":{\"admin\":7},"
       "\"set2\":{\"two\":false},"
-      "\"set1\":{\"one\":1,\"three\":\"t: 1\"}}\n";
+      "\"set1\":{\"one\":1,\"three\":\"t: 1\"},"
+      "\"files\":0}\n";
   const char *set1_req = "POST /api/set HTTP/1.0\nContent-Length: 18\n\n"
                          "{\"set1\":{\"one\":2}}";
   const char *set1_set3_req = "POST /api/set HTTP/1.0\n"
@@ -4244,8 +4410,14 @@ static void test_dash(void) {
                                "Authorization: Basic YWRtaW46YWRtaW4=\n"
                                "Content-Length: 20\n\n"
                                "{\"set3\":{\"admin\":8}}";
-  const char *set1_ws_set4_req =
-      "{\"id\":1,\"method\":\"set\",\"params\":{\"set1\":{\"one\":4}}}";
+  const char *set3_admin_req9 = "POST /api/set HTTP/1.0\n"
+                                "Authorization: Basic YWRtaW46YWRtaW4=\n"
+                                "Content-Length: 20\n\n"
+                                "{\"set3\":{\"admin\":9}}";
+  const char *set1_admin_set4_req = "POST /api/set HTTP/1.0\n"
+                                    "Authorization: Basic YWRtaW46YWRtaW4=\n"
+                                    "Content-Length: 18\n\n"
+                                    "{\"set1\":{\"one\":4}}";
   const char *set1_expected = "{\"one\":2,\"three\":\"t: 2\"}\n";
   const char *set1_expected3 = "{\"one\":3,\"three\":\"t: 3\"}\n";
   const char *set1_expected4 = "{\"one\":4,\"three\":\"t: 4\"}\n";
@@ -4256,13 +4428,47 @@ static void test_dash(void) {
   const char *set2_req = "POST /api/set HTTP/1.0\nContent-Length: 21\n\n"
                          "{\"set2\":{\"two\":true}}";
   const char *set2_expected = "{\"two\":false}\n";
+  const char *arr7_expected = "[{\"val\":49}]\n";
+  const char *arr0_2_expected = "[{\"val\":0},{\"val\":1},{\"val\":4}]\n";
+  const char *arr5_mod_req = "POST /api/get/arr/5 HTTP/1.0\n"
+                             "Authorization: Basic YWRtaW46YWRtaW4=\n"
+                             "Content-Length: 10\n\n"
+                             "{\"val\":99}";
+  const char *arr100_mod_req = "POST /api/get/arr/100 HTTP/1.0\n"
+                               "Authorization: Basic YWRtaW46YWRtaW4=\n"
+                               "Content-Length: 10\n\n"
+                               "{\"val\":99}";
+  const char *arr3_mod_req = "POST /api/get/arr/3 HTTP/1.0\n"
+                             "Authorization: Basic YWRtaW46YWRtaW4=\n"
+                             "Content-Length: 11\n\n"
+                             "{\"val\":777}";
+  const char *arr_add555_req = "POST /api/add/arr HTTP/1.0\n"
+                               "Authorization: Basic YWRtaW46YWRtaW4=\n"
+                               "Content-Length: 11\n\n"
+                               "{\"val\":555}";
+  const char *arr_add556_req = "POST /api/add/arr HTTP/1.0\n"
+                               "Authorization: Basic YWRtaW46YWRtaW4=\n"
+                               "Content-Length: 11\n\n"
+                               "{\"val\":556}";
+  const char *arr_add557_req = "POST /api/add/arr HTTP/1.0\n"
+                               "Authorization: Basic YWRtaW46YWRtaW4=\n"
+                               "Content-Length: 11\n\n"
+                               "{\"val\":557}";
+  const char *arr5_mod_expected = "[{\"val\":99}]\n";
+  const char *arr3_expected = "[{\"val\":9}]\n";
+  const char *arr17_expected = "[{\"val\":555}]\n";
+  const char *files_probe = "\"files\"";
+  const char *test_bin_probe = "\"test.bin\"";
   char marker = 0;
 
   memset(&dash, 0, sizeof(dash));
+  dash.session_auto_expiration_seconds = 1;
+  remove("/tmp/mongoose_dash_test/test.bin");
 
+  MG_DASH_ADD_FIELD_SET(&dash, &test_files_set);
   MG_DASH_ADD_FIELD_SET(&dash, &set1);
   ASSERT(dash.sets == &set1);
-  ASSERT(set1.next == NULL);
+  ASSERT(set1.next == &test_files_set);
 
   MG_DASH_ADD_FIELD_SET(&dash, &set2);
   ASSERT(dash.sets == &set2);
@@ -4279,26 +4485,9 @@ static void test_dash(void) {
   ASSERT(dash.custom_handlers->handler == dash_custom);
   ASSERT(dash.custom_handlers->handler_data == &marker);
 
-  while (mg_dash_files != NULL) mg_dash_file_del(mg_str(mg_dash_files->name));
-  mg_dash_file_add(mg_str("one.txt"), 123);
-  ASSERT(mg_dash_files != NULL);
-  ASSERT(strcmp(mg_dash_files->name, "one.txt") == 0);
-  ASSERT(mg_dash_files->size == 123);
-  mg_dash_file_add(mg_str("two.bin"), 456);
-  ASSERT(mg_dash_files != NULL);
-  ASSERT(strcmp(mg_dash_files->name, "two.bin") == 0);
-  ASSERT(mg_dash_files->size == 456);
-  ASSERT(mg_dash_files->next != NULL);
-  ASSERT(strcmp(mg_dash_files->next->name, "one.txt") == 0);
-  mg_dash_file_del(mg_str("one.txt"));
-  ASSERT(mg_dash_files != NULL);
-  ASSERT(strcmp(mg_dash_files->name, "two.bin") == 0);
-  ASSERT(mg_dash_files->next == NULL);
-  mg_dash_file_del(mg_str("missing.txt"));
-  ASSERT(mg_dash_files != NULL);
-  mg_dash_file_del(mg_str("two.bin"));
-  ASSERT(mg_dash_files == NULL);
+  for (i = 0; i < TEST_ARR_SIZE; i++) s_arr_store[i] = i * i;
 
+  MG_DASH_ADD_FIELD_SET(&dash, &arr_set);
   mg_mgr_init(&mgr);
   mg_mem_files = mg_packed_files;
   ASSERT(mg_http_listen(&mgr, url, mg_dash_ev_handler, &dash) != NULL);
@@ -4375,47 +4564,234 @@ static void test_dash(void) {
                "Authorization: Basic YWRtaW46YWRtaW4=\n\n") == 200);
   ASSERT(cmpbody(buf, set1_expected3) == 0);
 
-  ws_user_notify.req = NULL;
+  ws_user_notify.opened = 0;
   ws_user_notify.done = 0;
-  ws_user_notify.result = -1;
   ws_user_notify.saw_set3 = 0;
   mg_ws_connect(&mgr, ws_url, dash_ws_cb, &ws_user_notify, "%s",
                 "Authorization: Basic dXNlcjp1c2Vy\r\n");
+  for (i = 0; i < 200 && ws_user_notify.opened == 0; i++) mg_mgr_poll(&mgr, 1);
+  ASSERT(ws_user_notify.opened == 1);
+  ASSERT(fetch(&mgr, buf, url, set3_admin_req9) == 200);
+  ASSERT(cmpbody(buf, "1\n") == 0);
   for (i = 0; i < 200 && ws_user_notify.done == 0; i++) mg_mgr_poll(&mgr, 1);
-  ASSERT(ws_user_notify.done == 1);
+  ASSERT(ws_user_notify.done == 0);
   ASSERT(ws_user_notify.saw_set3 == 0);
 
-  ws_user.req = set1_ws_set4_req;
-  ws_user.done = 0;
-  ws_user.result = -1;
-  ws_user.saw_set3 = 0;
-  mg_ws_connect(&mgr, ws_url, dash_ws_cb, &ws_user, "%s",
-                "Authorization: Basic dXNlcjp1c2Vy\r\n");
-  for (i = 0; i < 200 && ws_user.done == 0; i++) mg_mgr_poll(&mgr, 1);
-  ASSERT(ws_user.done == 1);
-  ASSERT(ws_user.result == 0);
-  ASSERT(ws_user.saw_set3 == 0);
   ASSERT(fetch(&mgr, buf, url,
                "GET /api/get/set1 HTTP/1.0\n"
                "Authorization: Basic dXNlcjp1c2Vy\n\n") == 200);
   ASSERT(cmpbody(buf, set1_expected3) == 0);
 
-  ws_admin.req = set1_ws_set4_req;
+  ws_admin.opened = 0;
   ws_admin.done = 0;
-  ws_admin.result = -1;
   ws_admin.saw_set3 = 0;
   mg_ws_connect(&mgr, ws_url, dash_ws_cb, &ws_admin, "%s",
                 "Authorization: Basic YWRtaW46YWRtaW4=\r\n");
+  for (i = 0; i < 200 && ws_admin.opened == 0; i++) mg_mgr_poll(&mgr, 1);
+  ASSERT(ws_admin.opened == 1);
+  ASSERT(fetch(&mgr, buf, url, set3_admin_req) == 200);
+  ASSERT(cmpbody(buf, "1\n") == 0);
   for (i = 0; i < 200 && ws_admin.done == 0; i++) mg_mgr_poll(&mgr, 1);
   ASSERT(ws_admin.done == 1);
-  ASSERT(ws_admin.result == 1);
   ASSERT(ws_admin.saw_set3 == 1);
+  ASSERT(fetch(&mgr, buf, url, set1_admin_set4_req) == 200);
+  ASSERT(cmpbody(buf, "1\n") == 0);
   ASSERT(fetch(&mgr, buf, url,
                "GET /api/get/set1 HTTP/1.0\n"
                "Authorization: Basic YWRtaW46YWRtaW4=\n\n") == 200);
   ASSERT(cmpbody(buf, set1_expected4) == 0);
 
+  mg_delayms(1100);
+  ASSERT(fetch(&mgr, buf, url, "GET /api/hi HTTP/1.0\n\n") == 200);
+  ASSERT(cmpbody(buf, "hi\n") == 0);
+
+  // Array tests with auth (17 squares)
+  ASSERT(fetch(&mgr, buf, url,
+               "GET /api/get/arr HTTP/1.0\n"
+               "Authorization: Basic YWRtaW46YWRtaW4=\n\n") == 200);
+  ASSERT(cmpbody(buf, "17\n") == 0);
+  ASSERT(fetch(&mgr, buf, url,
+               "GET /api/get/arr/7 HTTP/1.0\n"
+               "Authorization: Basic YWRtaW46YWRtaW4=\n\n") == 200);
+  ASSERT(cmpbody(buf, arr7_expected) == 0);
+  ASSERT(fetch(&mgr, buf, url,
+               "GET /api/get/arr/0/2 HTTP/1.0\n"
+               "Authorization: Basic YWRtaW46YWRtaW4=\n\n") == 200);
+  ASSERT(cmpbody(buf, arr0_2_expected) == 0);
+
+  // Array deletion: single element
+  ASSERT(fetch(&mgr, buf, url,
+               "GET /api/del/arr/3 HTTP/1.0\n"
+               "Authorization: Basic YWRtaW46YWRtaW4=\n\n") == 200);
+  ASSERT(cmpbody(buf, "1\n") == 0);
+
+  // Array deletion: range
+  ASSERT(fetch(&mgr, buf, url,
+               "GET /api/del/arr/1/3 HTTP/1.0\n"
+               "Authorization: Basic YWRtaW46YWRtaW4=\n\n") == 200);
+  ASSERT(cmpbody(buf, "3\n") == 0);
+
+  // Array deletion: out-of-range returns 403
+  ASSERT(fetch(&mgr, buf, url,
+               "GET /api/del/arr/100 HTTP/1.0\n"
+               "Authorization: Basic YWRtaW46YWRtaW4=\n\n") == 403);
+
+  // Non-array set returns 404
+  ASSERT(fetch(&mgr, buf, url,
+               "GET /api/del/set1/0 HTTP/1.0\n"
+               "Authorization: Basic YWRtaW46YWRtaW4=\n\n") == 404);
+
+  // Test that array change notification uses "arr/INDEX" key format
+  {
+    struct dash_arr_ws_test ws_arr;
+    memset(&ws_arr, 0, sizeof(ws_arr));
+    ws_arr.saw_arr_index = -1;
+    ws_arr.saw_arr_val = -1;
+    ws_arr.saw_arr_size = -1;
+    mg_ws_connect(&mgr, ws_url, dash_arr_ws_cb, &ws_arr, "%s",
+                  "Authorization: Basic YWRtaW46YWRtaW4=\r\n");
+    for (i = 0; i < 200 && ws_arr.opened == 0; i++) mg_mgr_poll(&mgr, 1);
+    ASSERT(ws_arr.opened == 1);
+    s_arr_index = 5;
+    mg_dash_send_change(&mgr, &arr_set);
+    for (i = 0; i < 200 && ws_arr.done == 0; i++) mg_mgr_poll(&mgr, 1);
+    ASSERT(ws_arr.done == 1);
+    ASSERT(ws_arr.saw_arr_index == 5);
+  }
+
+  // Array modification: POST /api/get/<set>/<index> updates one element
+  // and broadcasts a "<set>/<index>" WS change notification with new value
+  {
+    struct dash_arr_ws_test ws_mod;
+    memset(&ws_mod, 0, sizeof(ws_mod));
+    ws_mod.saw_arr_index = -1;
+    ws_mod.saw_arr_val = -1;
+    ws_mod.saw_arr_size = -1;
+    mg_ws_connect(&mgr, ws_url, dash_arr_ws_cb, &ws_mod, "%s",
+                  "Authorization: Basic YWRtaW46YWRtaW4=\r\n");
+    for (i = 0; i < 200 && ws_mod.opened == 0; i++) mg_mgr_poll(&mgr, 1);
+    ASSERT(ws_mod.opened == 1);
+
+    ASSERT(fetch(&mgr, buf, url, arr5_mod_req) == 200);
+    ASSERT(cmpbody(buf, "1\n") == 0);
+
+    for (i = 0; i < 200 && ws_mod.done == 0; i++) mg_mgr_poll(&mgr, 1);
+    ASSERT(ws_mod.done == 1);
+    ASSERT(ws_mod.saw_arr_index == 5);
+    ASSERT(ws_mod.saw_arr_val == 99);
+
+    // The new value got persisted - a fresh read returns it
+    ASSERT(fetch(&mgr, buf, url,
+                 "GET /api/get/arr/5 HTTP/1.0\n"
+                 "Authorization: Basic YWRtaW46YWRtaW4=\n\n") == 200);
+    ASSERT(cmpbody(buf, arr5_mod_expected) == 0);
+
+    // Out-of-range index: 404
+    ASSERT(fetch(&mgr, buf, url, arr100_mod_req) == 404);
+
+    // Read-only element: fn denies MG_DASH_WRITE -> 403, value unchanged
+    ASSERT(fetch(&mgr, buf, url, arr3_mod_req) == 403);
+    ASSERT(fetch(&mgr, buf, url,
+                 "GET /api/get/arr/3 HTTP/1.0\n"
+                 "Authorization: Basic YWRtaW46YWRtaW4=\n\n") == 200);
+    ASSERT(cmpbody(buf, arr3_expected) == 0);
+  }
+
+  // Array addition: POST /api/add/<set> appends an element and broadcasts
+  // a plain "<set>":N WS change notification with the new size
+  {
+    struct dash_arr_ws_test ws_add;
+    memset(&ws_add, 0, sizeof(ws_add));
+    ws_add.saw_arr_index = -1;
+    ws_add.saw_arr_val = -1;
+    ws_add.saw_arr_size = -1;
+    mg_ws_connect(&mgr, ws_url, dash_arr_ws_cb, &ws_add, "%s",
+                  "Authorization: Basic YWRtaW46YWRtaW4=\r\n");
+    for (i = 0; i < 200 && ws_add.opened == 0; i++) mg_mgr_poll(&mgr, 1);
+    ASSERT(ws_add.opened == 1);
+
+    ASSERT(fetch(&mgr, buf, url, arr_add555_req) == 200);
+    ASSERT(cmpbody(buf, "true\n") == 0);
+
+    for (i = 0; i < 200 && ws_add.done == 0; i++) mg_mgr_poll(&mgr, 1);
+    ASSERT(ws_add.done == 1);
+    ASSERT(ws_add.saw_arr_size == TEST_ARR_SIZE + 1);
+
+    // The new element landed at the end of the array
+    ASSERT(fetch(&mgr, buf, url,
+                 "GET /api/get/arr/17 HTTP/1.0\n"
+                 "Authorization: Basic YWRtaW46YWRtaW4=\n\n") == 200);
+    ASSERT(cmpbody(buf, arr17_expected) == 0);
+
+    // One more addition reaches the cap, then fn denies further ones
+    ASSERT(fetch(&mgr, buf, url, arr_add556_req) == 200);
+    ASSERT(fetch(&mgr, buf, url, arr_add557_req) == 403);
+  }
+
   mg_mgr_free(&mgr);
+
+  // Test no files fieldset: /fs/ returns 404
+  {
+    const char *url2 = "http://localhost:26353";
+    struct mg_mgr mgr2;
+    struct mg_dash dash2;
+    memset(&dash2, 0, sizeof(dash2));
+    MG_DASH_ADD_FIELD_SET(&dash2, &set1);
+    MG_DASH_ADD_FIELD_SET(&dash2, &set2);
+    MG_DASH_ADD_FIELD_SET(&dash2, &set3);
+    mg_mgr_init(&mgr2);
+    mg_mem_files = mg_packed_files;
+    ASSERT(mg_http_listen(&mgr2, url2, mg_dash_ev_handler, &dash2) != NULL);
+    ASSERT(fetch(&mgr2, buf, url2, "GET /api/get HTTP/1.0\n\n") == 200);
+    ASSERT(strstr(buf, files_probe) == NULL);  // no files fieldset
+    ASSERT(fetch(&mgr2, buf, url2, "GET /fs/files/test.txt HTTP/1.0\n\n") == 404);
+    ASSERT(fetch(&mgr2, buf, url2,
+                 "POST /fs/files/test.txt HTTP/1.0\nContent-Length: 5\n\nhello") ==
+           404);
+    mg_mgr_free(&mgr2);
+  }
+
+  // Test files fieldset with get_dir: /fs/ endpoints active
+  {
+    const char *url3 = "http://localhost:26354";
+    struct mg_mgr mgr3;
+    struct mg_dash dash3;
+    static int idx3;
+    static struct mg_field ff3[] = {
+        {"name", MG_VAL_STR, s_delete_file.name, sizeof(s_delete_file.name)},
+        {"size", MG_VAL_UINT64, &s_delete_file.size, 0},
+        {NULL, MG_VAL_INT, NULL, 0},
+    };
+    static struct mg_field_set fset3 = {"files", ff3, delete_file_fn, &idx3,
+                                        test_upload_dir, NULL};
+    memset(&dash3, 0, sizeof(dash3));
+    s_deleted_file[0] = '\0';
+    s_uploaded_file[0] = '\0';
+    s_delete_file_set = &fset3;
+    MG_DASH_ADD_FIELD_SET(&dash3, &fset3);
+    mg_mgr_init(&mgr3);
+    mg_mem_files = mg_packed_files;
+    ASSERT(mg_http_listen(&mgr3, url3, mg_dash_ev_handler, &dash3) != NULL);
+    ASSERT(fetch(&mgr3, buf, url3, "GET /api/get HTTP/1.0\n\n") == 200);
+    ASSERT(strstr(buf, files_probe) != NULL);  // files fieldset present
+    ASSERT(fetch(&mgr3, buf, url3,
+                 "DELETE /fs/files/nofile.txt HTTP/1.0\n\n") == 200);
+    ASSERT(strcmp(s_deleted_file, "nofile.txt") == 0);
+    ASSERT(fetch(&mgr3, buf, url3,
+                 "DELETE /fs/files/..%2Fevil.txt HTTP/1.0\n\n") == 400);
+    ASSERT(strcmp(s_deleted_file, "nofile.txt") == 0);
+    ASSERT(fetch(&mgr3, buf, url3,
+                 "PUT /fs/files/test.bin HTTP/1.0\nContent-Length: 4\n\ndata") ==
+           200);
+    ASSERT(strcmp(s_uploaded_file, "test.bin") == 0);
+    ASSERT(fetch(&mgr3, buf, url3,
+                 "PUT /fs/files/..%2Fevil.bin HTTP/1.0\nContent-Length: "
+                 "4\n\ndata") == 400);
+    ASSERT(strcmp(s_uploaded_file, "test.bin") == 0);
+    ASSERT(fetch(&mgr3, buf, url3, "GET /api/get/files/0 HTTP/1.0\n\n") == 200);
+    ASSERT(strstr(buf, test_bin_probe) != NULL);
+    mg_mgr_free(&mgr3);
+  }
 }
 
 #define DASHBOARD(x) \
@@ -4760,6 +5136,50 @@ static void test_modbus(void) {
   mg_mgr_free(&mgr);
 }
 
+
+struct wudata {
+  struct mg_mgr *mgr;
+  unsigned long conn_id;  // Parent connection ID
+};
+
+static void wuthread(void *param) {
+  struct wudata *p = (struct wudata *) param;
+  mg_wakeup(p->mgr, p->conn_id, "hi!", 3);  // Send to parent
+  free(p);       // Free all resources that were passed to us
+}
+
+static void hwu(struct mg_connection *c, int ev, void *ev_data) {
+  if (ev == MG_EV_WAKEUP) {
+    struct mg_str *data = (struct mg_str *) ev_data;
+    MG_DEBUG(("Woke up, got: %.*s", data->len, data->buf));
+    memcpy(c->data, data->buf, data->len);
+    c->data[data->len] = '\0';
+  }
+}
+
+static void test_wakeup(void) {
+#if MG_ENABLE_SOCKET
+  struct mg_mgr mgr;
+  struct mg_connection *c;
+  struct wudata *data;
+  int i;
+  mg_mgr_init(&mgr);        // Initialise event manager
+  mg_log_set(MG_LL_DEBUG);  // Set debug log level
+  c = mg_http_listen(&mgr, "http://127.0.0.1:42347", hwu, NULL);
+  mg_wakeup_init(&mgr);  // Initialise wakeup socket pair
+  data = (struct wudata *) calloc(1, sizeof(*data));  // wuthread owns it
+  data->conn_id = c->id;
+  data->mgr = c->mgr;
+  start_thread(wuthread, data);  // Start thread and pass data
+  for (i = 0; i < 10 || c->data[0] == '\0'; i++) mg_mgr_poll(&mgr, 100);
+  ASSERT(mg_strcmp(mg_str(c->data), mg_str_n("hi!", 3)) == 0);
+  mg_mgr_free(&mgr);
+#else
+  printf("\nNO SOCKET SUPPORT, skipping mg_wakeup() test\n");
+  (void) hwu; (void) wuthread;
+#endif
+}
+
 int main(void) {
   const char *debug_level = getenv("V");
   if (debug_level == NULL) debug_level = "3";
@@ -4804,6 +5224,10 @@ int main(void) {
   s_error = false;
   test_udp();
   DASHBOARD("udp");
+
+  s_error = false;
+  test_wakeup();
+  DASHBOARD("wakeup");
 
   s_error = false;
   test_get_header_var();
@@ -4863,19 +5287,16 @@ int main(void) {
   test_sntp();
   DASHBOARD("sntp");
 
-#if MG_TLS != MG_TLS_BUILTIN
   s_error = false;
   test_mqtt();  // sorry, MQTT_LOCALHOST is also skipped
   DASHBOARD("mqtt");
-#else
-  (void) test_mqtt;
-#endif
 
   s_error = false;
   test_http_client();
   DASHBOARD("http_client");
 
 #else
+  printf("\nLOCALHOST_ONLY, skipping SNTP, MQTT and HTTPclient tests\n");
   (void) test_sntp, (void) test_mqtt, (void) test_http_client;
 #endif
   s_error = false;

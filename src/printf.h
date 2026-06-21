@@ -1,32 +1,55 @@
 #pragma once
 
 #include "arch.h"
+#include "fmt.h"
 #include "iobuf.h"
 #include "queue.h"
 
-// Convenience wrappers around mg_xprintf
+// Formats data into a caller-supplied buffer.
+//
+// Returns:
+//   Number of bytes that would be written if buf were large enough, like
+//   snprintf().
+// Example:
+//   char buf[20];
+//   mg_snprintf(buf, sizeof(buf), "{%m:%d}", MG_ESC("status"), 1);
+// Full examples:
+//   tutorials/http/link-checker, tutorials/http/redirect-to-https,
+//   tutorials/mqtt/mqtt-dashboard/device
+// Related APIs:
+//   mg_xprintf(), mg_printf(), mg_mprintf(), MG_ESC
+// Notes:
+//   These functions are just wrappers around mg_xprintf().
+//   Call with buf=NULL and len=0 to measure. NUL-terminates if the result fits
+//   (return value < len). Supports mg_xprintf specifiers, including custom
+//   %M/%m printers. Use MG_ESC when printing JSON strings.
 size_t mg_vsnprintf(char *buf, size_t len, const char *fmt, va_list *ap);
-size_t mg_snprintf(char *, size_t, const char *fmt, ...);
+size_t mg_snprintf(char *buf, size_t len, const char *fmt, ...);
+
+// Formats into a heap-allocated NUL-terminated string. Caller must mg_free() it.
 char *mg_vmprintf(const char *fmt, va_list *ap);
 char *mg_mprintf(const char *fmt, ...);
+
+// Formats into a mg_queue slot. Returns bytes written, or 0 if no space.
 size_t mg_queue_printf(struct mg_queue *, const char *fmt, ...);
 
-// %M print helper functions
-size_t mg_print_base64(void (*out)(char, void *), void *arg, va_list *ap);
-size_t mg_print_esc(void (*out)(char, void *), void *arg, va_list *ap);
-size_t mg_print_hex(void (*out)(char, void *), void *arg, va_list *ap);
-size_t mg_print_ip(void (*out)(char, void *), void *arg, va_list *ap);
-size_t mg_print_ip_port(void (*out)(char, void *), void *arg, va_list *ap);
-size_t mg_print_ip4(void (*out)(char, void *), void *arg, va_list *ap);
-size_t mg_print_ip6(void (*out)(char, void *), void *arg, va_list *ap);
-size_t mg_print_mac(void (*out)(char, void *), void *arg, va_list *ap);
-size_t mg_print_ieee64(void (*out)(char, void *), void *arg, va_list *ap);
-size_t mg_print_l2addr(void (*out)(char, void *), void *arg, va_list *ap);
+// Built-in %M/%m printer functions. Each reads its argument(s) from ap.
+size_t mg_print_base64(mg_pfn_t, void *arg, va_list *ap);   // expects: const void *buf, size_t len
+size_t mg_print_esc(mg_pfn_t, void *arg, va_list *ap);      // expects: int quote, const char *str -- use MG_ESC()
+size_t mg_print_hex(mg_pfn_t, void *arg, va_list *ap);      // expects: const void *buf, size_t len
+size_t mg_print_ip(mg_pfn_t, void *arg, va_list *ap);       // expects: const struct mg_addr *
+size_t mg_print_ip_port(mg_pfn_t, void *arg, va_list *ap);  // expects: const struct mg_addr *
+size_t mg_print_ip4(mg_pfn_t, void *arg, va_list *ap);      // expects: uint32_t *ipv4
+size_t mg_print_ip6(mg_pfn_t, void *arg, va_list *ap);      // expects: uint8_t[16] ipv6
+size_t mg_print_mac(mg_pfn_t, void *arg, va_list *ap);      // expects: uint8_t[6] mac
+size_t mg_print_ieee64(mg_pfn_t, void *arg, va_list *ap);   // expects: uint64_t
+size_t mg_print_l2addr(mg_pfn_t, void *arg, va_list *ap);   // expects: uint8_t l2, uint8_t[n] n-byte l2-dependent address
 
-// Various output functions
-void mg_pfn_iobuf(char ch, void *param);           // param: struct mg_iobuf *
-void mg_pfn_iobuf_noresize(char ch, void *param);  // param: struct mg_iobuf *
-void mg_pfn_stdout(char c, void *param);           // param: ignored
+// Output functions for use as the fn argument to mg_xprintf/mg_vxprintf.
+void mg_pfn_iobuf(char ch, void *param);           // param: struct mg_iobuf * (resizes as needed)
+void mg_pfn_iobuf_noresize(char ch, void *param);  // param: struct mg_iobuf * (fixed buffer, no resize)
+void mg_pfn_stdout(char c, void *param);           // param: ignored, writes to stdout
 
-// A helper macro for printing JSON: mg_snprintf(buf, len, "%m", MG_ESC("hi"))
+// Expands to the three arguments for %m to JSON-escape a string literal.
+// Example: mg_snprintf(buf, len, "%m", MG_ESC("hello")) -> "\"hello\""
 #define MG_ESC(str) mg_print_esc, 0, (str)

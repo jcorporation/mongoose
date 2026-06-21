@@ -23,6 +23,8 @@ struct connstate {
   uint64_t timer;                         // TCP timer (see 'ttype' below)
   uint32_t acked;                         // Last ACK-ed number
   size_t unacked;                         // Not acked bytes
+  uint32_t maxseq;                        // Max send seq (ack + window)
+  uint16_t win;                           // destination current window size
   uint16_t dmss;                          // destination MSS (from TCP opts)
   uint8_t mac[sizeof(struct mg_l2addr)];  // Peer hw address
   uint8_t ttype;                          // Timer type:
@@ -210,11 +212,11 @@ bool mg_l2_poll(struct mg_tcpip_if *ifp, bool expired_1000ms);
 
 static void mg_tcpip_call(struct mg_tcpip_if *ifp, int ev, void *ev_data) {
 #if 0 && MG_ENABLE_PROFILE
-  const char *names[] = {"TCPIP_EV_ST_CHG",        "TCPIP_EV_DHCP_DNS",
+  const char *names[] = {"TCPIP_EV_STATE_CHANGE",  "TCPIP_EV_DHCP_DNS",
                          "TCPIP_EV_DHCP_SNTP",     "TCPIP_EV_ARP",
                          "TCPIP_EV_TIMER_1S",      "TCPIP_EV_WIFI_SCAN_RESULT",
                          "TCPIP_EV_WIFI_SCAN_END", "TCPIP_EV_WIFI_CONNECT_ERR",
-                         "TCPIP_EV_DRIVER",        "MG_TCPIP_EV_ST6_CHG",
+                         "TCPIP_EV_DRIVER",        "TCPIP_EV_STATE6_CHANGE",
                          "TCPIP_EV_USER"};
   if (ev != MG_TCPIP_EV_TIMER_1S && ev < (int) (sizeof(names) / sizeof(names[0]))) {
     MG_PROF_ADD(ifp, names[ev]); // TODO(): call MG_PROF_DUMP() MG_PROF_FREE()
@@ -391,6 +393,13 @@ static void onstatechange(struct mg_tcpip_if *ifp) {
       MG_INFO(("      MAC: %M", mg_print_mac, ifp->mac));
     if (ifp->l2type == MG_TCPIP_L2_ETH)
       mg_tcpip_arp_request(ifp, ifp->ip, ifp->mac);  // gratuitous ARP annc
+    if (ifp->is_ip_changed) {
+      struct mg_connection *c;
+      for (c = ifp->mgr->conns; c != NULL; c = c->next) {
+        if (!c->is_listening && !c->is_udp) c->is_closing = 1;
+      }
+      ifp->is_ip_changed = false;
+    }
   } else if (ifp->state == MG_TCPIP_STATE_IP) {
     if (ifp->gw != 0 && ifp->l2type == MG_TCPIP_L2_ETH)
       mg_tcpip_arp_request(ifp, ifp->gw, NULL);  // unsolicited GW ARP request
@@ -399,7 +408,7 @@ static void onstatechange(struct mg_tcpip_if *ifp) {
   } else if (ifp->state == MG_TCPIP_STATE_DOWN) {
     MG_ERROR(("Link down"));
   }
-  mg_tcpip_call(ifp, MG_TCPIP_EV_ST_CHG, &ifp->state);
+  mg_tcpip_call(ifp, MG_TCPIP_EV_STATE_CHANGE, &ifp->state);
 }
 
 static struct ip *tx_ip(struct mg_tcpip_if *ifp, uint8_t *l2_dst, uint8_t proto,
@@ -700,6 +709,7 @@ static void rx_dhcp_client(struct mg_tcpip_if *ifp, struct pkt *pkt) {
       // assume DHCP server = router until ARP resolves
       memcpy(ifp->gwmac, mg_l2_getaddr(ifp, pkt->l2), sizeof(ifp->gwmac));
       ifp->gw_ready = true;  // NOTE(): actual gw ARP won't retry now
+      if (ifp->ip != ip) ifp->is_ip_changed = true;
       ifp->ip = ip, ifp->gw = gw, ifp->mask = mask;
       ifp->state = MG_TCPIP_STATE_IP;  // BOUND state
       mg_random(&rand, sizeof(rand));
@@ -838,7 +848,7 @@ static void rx_ndp_na(struct mg_tcpip_if *ifp, struct pkt *pkt) {
       uint8_t len = *opts++;  // check valid hwaddr and get it
       if (!mg_l2_ip6get(ifp->l2type, s->mac, opts, len)) return;
       MG_DEBUG(("%lu NDP resolved %M -> %M", c->id, mg_print_ip6,
-                &c->rem.addr.ip6, mg_print_mac, ifp->l2type, s->mac));
+                &c->rem.addr.ip6, mg_print_l2addr, ifp->l2type, s->mac));
       c->is_arplooking = 0;
       l2addr_resolved(c);
     }
@@ -955,7 +965,7 @@ static void rx_ndp_ra(struct mg_tcpip_if *ifp, struct pkt *pkt) {
   struct ndp_ra *ra = (struct ndp_ra *) (pkt->icmp6 + 1);
   uint8_t *opts = (uint8_t *) (ra + 1);
   size_t opt_left = pkt->pay.len - 12;
-  bool gotl2addr = false, gotprefix = false;
+  bool gotl2addr = false, gotprefix = false, changed = false;
   uint8_t l2[sizeof(struct mg_l2addr)];
   uint32_t mtu = 0;
   uint8_t *prefix, prefix_len;
@@ -973,12 +983,12 @@ static void rx_ndp_ra(struct mg_tcpip_if *ifp, struct pkt *pkt) {
         gotl2addr = true;
       } else if (type == 5 && length >= 8) {
         // process MTU if available
-        mtu = mg_ntohl(*(uint32_t *) (opts + 4));
+        mtu = MG_LOAD_BE32(opts + 4);
       } else if (type == 3 && length >= 32) {
         // process prefix, 4.6.2
         uint8_t pfx_flags = opts[3];  // L=0x80, A=0x40
-        uint32_t valid = mg_ntohl(*(uint32_t *) (opts + 4));
-        uint32_t pref_lifetime = mg_ntohl(*(uint32_t *) (opts + 8));
+        uint32_t valid = MG_LOAD_BE32(opts + 4);
+        uint32_t pref_lifetime = MG_LOAD_BE32(opts + 8);
         prefix_len = opts[2];
         prefix = opts + 16;
 
@@ -988,6 +998,8 @@ static void rx_ndp_ra(struct mg_tcpip_if *ifp, struct pkt *pkt) {
         (void) pref_lifetime;
 
         gotprefix = true;
+        if (prefix_len != ifp->prefix_len || !match_prefix(prefix, ifp->prefix, ifp->prefix_len))
+          changed = true;
       }
       opts += length;
       opt_left -= length;
@@ -995,6 +1007,7 @@ static void rx_ndp_ra(struct mg_tcpip_if *ifp, struct pkt *pkt) {
 
     // fill prefix and global
     if (gotprefix && !fill_global(ifp, prefix, prefix_len)) return;
+    if (changed) ifp->is_ip6_changed = true;
     ifp->gw6[0] = pkt->ip6->src[0], ifp->gw6[1] = pkt->ip6->src[1];
     if (gotl2addr) memcpy(ifp->gw6mac, l2, sizeof(ifp->gw6mac));
     if (gotl2addr || ifp->l2type == MG_TCPIP_L2_PPP || ifp->l2type == MG_TCPIP_L2_PPPoE) {
@@ -1074,6 +1087,13 @@ static void onstate6change(struct mg_tcpip_if *ifp) {
                   ifp->ip6, (uint64_t *) ip6_allrouters.addr.ip6, false,
                   ifp->mac);
     }
+    if (ifp->is_ip6_changed) {
+      struct mg_connection *c;
+      for (c = ifp->mgr->conns; c != NULL; c = c->next) {
+        if (!c->is_listening && !c->is_udp) c->is_closing = 1;
+      }
+      ifp->is_ip6_changed = false;
+    }
   } else if (ifp->state6 == MG_TCPIP_STATE_IP) {
     if ((ifp->gw6[0] != 0 || ifp->gw6[1] != 0) && (ifp->l2type != MG_TCPIP_L2_PPP && ifp->l2type != MG_TCPIP_L2_PPPoE))
       tx_ndp_ns(ifp, ifp->gw6, NULL);  // unsolicited GW hwaddr resolution
@@ -1081,7 +1101,7 @@ static void onstate6change(struct mg_tcpip_if *ifp) {
     MG_INFO(("IP: %M", mg_print_ip6, &ifp->ip6ll));
   }
   if (ifp->state6 > MG_TCPIP_STATE_UP)
-    mg_tcpip_call(ifp, MG_TCPIP_EV_ST6_CHG, &ifp->state6);
+    mg_tcpip_call(ifp, MG_TCPIP_EV_STATE6_CHANGE, &ifp->state6);
 }
 #endif
 
@@ -1268,6 +1288,7 @@ static struct mg_connection *accept_conn(struct mg_connection *lsn,
   s = (struct connstate *) (c + 1);
   s->dmss = mss;  // from options in client SYN
   s->seq = mg_ntohl(pkt->tcp->ack), s->ack = mg_ntohl(pkt->tcp->seq);
+  s->win = mg_ntohs(pkt->tcp->win), s->maxseq = (uint32_t)(s->seq + s->win);
 #if MG_ENABLE_IPV6
   if (lsn->loc.is_ip6) {
     c->rem.addr.ip6[0] = pkt->ip6->src[0],
@@ -1360,10 +1381,13 @@ long mg_io_send(struct mg_connection *c, const void *buf, size_t len) {
   len = trim_len(c, len);
   if (c->is_udp) {
     if (!udp_send(c, buf, len)) return MG_IO_WAIT;
-  } else {  // TCP, cap to peer's MSS
+  } else {  // TCP, cap to peer's MSS and check window
     struct mg_tcpip_if *ifp = c->mgr->ifp;
     size_t sent;
+    uint32_t room = s->maxseq - s->seq;
+    if (room == 0) return MG_IO_WAIT;
     if (len > s->dmss) len = s->dmss;  // RFC-6691: reduce if sending opts
+    if ((uint32_t) len > room) len = room;
     sent = tx_tcp(ifp, s->mac, &c->loc, &c->rem, TH_PUSH | TH_ACK,
                   mg_htonl(s->seq), mg_htonl(s->ack), buf, len);
     if (sent == 0) {
@@ -1379,13 +1403,16 @@ long mg_io_send(struct mg_connection *c, const void *buf, size_t len) {
 }
 
 static void handle_tls_recv(struct mg_connection *c) {
-  size_t avail = mg_tls_pending(c);
+  size_t avail = mg_tls_pending(c); // will change after mg_tls_recv()
   size_t min = avail > MG_MAX_RECV_SIZE ? MG_MAX_RECV_SIZE : avail;
-  struct mg_iobuf *io = &c->recv;
+  struct mg_iobuf *io = &c->recv; // allocated on first avail > 0
   if (io->size - io->len < min && !mg_iobuf_resize(io, io->len + min)) {
     mg_error(c, "oom");
   } else {
-    // Decrypt data directly into c->recv
+    // Decrypt data directly into c->recv. If io->buf = NULL or
+    // io->len = io->size (no room), there can be outstanding data that can't be
+    // moved (mg_tls_pending() > 0 after mg_tls_recv() returns). So mg_tls_recv()
+    // takes care of returning 0 in this case (commented as "MIP")
     long n = mg_tls_recv(c, io->buf != NULL ? &io->buf[io->len] : io->buf,
                          io->size - io->len);
     if (n == MG_IO_ERR) {
@@ -1396,6 +1423,12 @@ static void handle_tls_recv(struct mg_connection *c) {
       mg_call(c, MG_EV_READ, &n);
     }  // else n < 0: outstanding data to be moved to c->recv
   }
+}
+
+static void handle_ack(struct connstate *s, uint32_t ackno, uint16_t win) {
+  if (ackno < (s->seq - s->win) || ackno > s->seq) return;
+  s->maxseq = (uint32_t)(ackno + win);
+  s->win = win;
 }
 
 static void read_conn(struct mg_connection *c, struct pkt *pkt) {
@@ -1423,9 +1456,10 @@ static void read_conn(struct mg_connection *c, struct pkt *pkt) {
       }
       s->twclosure = true;
     } else {
-      flags |= TH_FIN;
+      // Peer closed first: send ACK only, enter CLOSE_WAIT.
+      // The connection loop will call init_closure after pending send data
+      // is flushed, then send our FIN.
       c->is_draining = 1;
-      settmout(c, MIP_TTYPE_FIN);
     }
     tx_tcp(c->mgr->ifp, s->mac, &c->loc, &c->rem, flags, mg_htonl(s->seq),
            mg_htonl(s->ack), "", 0);
@@ -1437,6 +1471,8 @@ static void read_conn(struct mg_connection *c, struct pkt *pkt) {
            mg_htonl(s->ack), NULL, 0);
     return;                        // no data to process
   } else if (pkt->pay.len == 0) {  // this is an ACK
+    if (pkt->tcp->flags & TH_ACK)
+      handle_ack(s, mg_ntohl(pkt->tcp->ack), mg_ntohs(pkt->tcp->win));
     if (s->fin_rcvd && s->ttype == MIP_TTYPE_FIN) s->twclosure = true;
     return;  // no data to process
   } else if (seq != s->ack) {
@@ -1454,6 +1490,8 @@ static void read_conn(struct mg_connection *c, struct pkt *pkt) {
     mg_error(c, "oom");
     return;  // drop it
   }
+    if (pkt->tcp->flags & TH_ACK)
+      handle_ack(s, mg_ntohl(pkt->tcp->ack), mg_ntohs(pkt->tcp->win));
   // Copy TCP payload into the IO buffer. If the connection is plain text,
   // we copy to c->recv. If the connection is TLS, this data is encrypted,
   // therefore we copy that encrypted data to the c->rtls iobuffer instead,
@@ -1572,6 +1610,7 @@ static void rx_tcp(struct mg_tcpip_if *ifp, struct pkt *pkt) {
     if (!handle_opt(s, pkt->tcp, pkt->ip6 != NULL))
       return;  // process options (MSS)
     s->seq = mg_ntohl(pkt->tcp->ack), s->ack = mg_ntohl(pkt->tcp->seq) + 1;
+    s->win = mg_ntohs(pkt->tcp->win), s->maxseq = (uint32_t)(s->seq + s->win);
     tx_tcp_ctrlresp(ifp, pkt, TH_ACK, pkt->tcp->ack);
     c->is_connecting = 0;  // Client connected
     settmout(c, MIP_TTYPE_KEEPALIVE);
@@ -2080,7 +2119,11 @@ void mg_connect_resolved(struct mg_connection *c) {
   c->loc.port = mg_htons(ifp->eport++);
 #if MG_ENABLE_IPV6
   if (c->rem.is_ip6) {
-    c->loc.addr.ip6[0] = ifp->ip6[0], c->loc.addr.ip6[1] = ifp->ip6[1],
+    if(c->rem.addr.ip6[0] == ifp->ip6ll[0]) { // same local LAN, use ll
+      c->loc.addr.ip6[0] = ifp->ip6ll[0], c->loc.addr.ip6[1] = ifp->ip6ll[1];
+    } else { // use global address
+      c->loc.addr.ip6[0] = ifp->ip6[0], c->loc.addr.ip6[1] = ifp->ip6[1];
+    }
     c->loc.is_ip6 = true;
   } else
 #endif
@@ -2179,6 +2222,7 @@ void mg_mgr_poll(struct mg_mgr *mgr, int ms) {
   struct mg_connection *c, *tmp;
   uint64_t now = mg_millis();
   mg_timer_poll(&mgr->timers, now);
+  mg_ota_poll(mgr);
   if (mgr->ifp == NULL || mgr->ifp->driver == NULL) return;
   mg_tcpip_poll(mgr->ifp, now);
   for (c = mgr->conns; c != NULL; c = tmp) {

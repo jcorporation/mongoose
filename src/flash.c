@@ -2,6 +2,10 @@
 #include "flash.h"
 #include "log.h"
 #include "ota.h"
+#ifdef MG_OTA_PUBLIC_KEY
+#include "sha256.h"
+#include "tls_uecc.h"
+#endif
 
 #if MG_OTA != MG_OTA_NONE && MG_OTA != MG_OTA_CUSTOM
 
@@ -23,7 +27,7 @@ bool mg_ota_flash_begin(size_t new_firmware_size, struct mg_flash *flash) {
       s_size = new_firmware_size;
       MG_INFO(("Starting OTA, firmware size %lu", s_size));
     } else {
-      MG_ERROR(("Firmware %lu is too big to fit %lu", new_firmware_size, half));
+      MG_ERROR(("Firmware %lu is too big to fit %lu", new_firmware_size, half - flash->align));
     }
   }
   return ok;
@@ -53,14 +57,36 @@ bool mg_ota_flash_write(const void *buf, size_t len, struct mg_flash *flash) {
 bool mg_ota_flash_end(struct mg_flash *flash) {
   char *base = (char *) flash->start + flash->size / 2;
   bool ok = false;
+  int prev_state = MG_OTA_STATE_GET();
   if (s_size) {
     size_t size = (size_t) (s_addr - base);
     uint32_t crc32 = mg_crc32(0, base, s_size);
     if (size == s_size && crc32 == s_crc32) ok = true;
     MG_DEBUG(("CRC: %x/%x, size: %lu/%lu, status: %s", s_crc32, crc32, s_size,
               size, ok ? "ok" : "fail"));
+#ifdef MG_OTA_PUBLIC_KEY
+    if (ok) {
+      bool signed_fw = s_size > 68 &&
+                       memcmp((uint8_t *) base + s_size - 4, "MGSG", 4) == 0;
+      if (signed_fw) {
+        static const uint8_t s_pubkey[] = MG_OTA_PUBLIC_KEY;
+        uint8_t hash[32];
+        size_t fw_size = s_size - 68;  // strip 64-byte sig + 4-byte magic
+        mg_sha256(hash, (uint8_t *) base, fw_size);
+        ok = mg_uecc_verify(s_pubkey, hash, sizeof(hash),
+                            (uint8_t *) base + fw_size,
+                            mg_uecc_secp256r1()) == 1;
+        MG_INFO(("Signature: %s", ok ? "ok" : "fail"));
+      } else {
+        ok = false;
+        MG_ERROR(("Unsigned firmware rejected"));
+      }
+    }
+#endif
     s_size = 0;
+    if (ok) MG_OTA_STATE_SET(MG_OTA_TESTING);
     if (ok) ok = flash->swap_fn();
+    if (!ok) MG_OTA_STATE_SET(prev_state); // undo state in case of failure
   }
   MG_INFO(("Finishing OTA: %s", ok ? "ok" : "fail"));
   return ok;
