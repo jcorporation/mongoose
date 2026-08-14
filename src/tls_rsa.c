@@ -1,3 +1,4 @@
+#include "sha256.h"
 #include "tls.h"
 #include "tls_rsa.h"
 #include "util.h"
@@ -883,6 +884,107 @@ done:
   mg_bzero(x, sizeof(x));
   if (!ok) return rsa_fail(signature, sig_len);
   return 0;
+}
+
+// MGF1-SHA256 RFC 8017 B.2.1
+static void mgf1_sha256(const uint8_t *seed, size_t seed_len,
+                            uint8_t *mask,  size_t mask_len) {
+  uint8_t cnt[4];   // I2OSP(counter, 4), big-endian
+  uint8_t tmp[32];  // one SHA-256 output block
+  uint32_t counter = 0;
+  size_t off = 0;
+  mg_sha256_ctx ctx;
+  while (off < mask_len) {
+    size_t n = mask_len - off;
+    if (n > 32) n = 32;
+    br_enc32be(cnt, counter);
+    mg_sha256_init(&ctx);
+    mg_sha256_update(&ctx, seed, seed_len);
+    mg_sha256_update(&ctx, cnt, 4);
+    mg_sha256_final(tmp, &ctx);
+    memcpy(mask + off, tmp, n);
+    off += n;
+    ++counter;
+  }
+}
+
+// Full RSASSA-PSS-VERIFY for rsa_pss_rsae_sha256 (RFC 8017 9.1.2)
+// em      - output of RSA public-key primitive (nlen bytes)
+// nlen    - modulus byte length (66 to 512)
+// mhash   - SHA-256 of the TLS 1.3 signed content (tls->sighash, 32 bytes)
+static bool pss_verify_sha256(const uint8_t *em, size_t nlen, const uint8_t *mhash) {
+  // TLS 1.3: H_len = salt_len = 32
+  uint8_t db[479];          // unmasked DB after MGF1 XOR
+  uint8_t dbmask[479];      // MGF1-SHA256(H, db_len); nlen - hLen - 1 = 479
+  uint8_t Hprime[32];       // SHA-256(0x00*8 || mhash || salt)
+  uint8_t Mprime[8 + 32 + 32]; // 0*8 || mhash || salt
+  const uint8_t *H;
+  const uint8_t *salt;
+  size_t db_len;
+  size_t i;
+  uint8_t bad;
+  
+  if (nlen < 32 + 32 + 2 || nlen - 32 - 1 > sizeof(db)) return -1;
+  if (em[nlen - 1] != 0xbc) return false;
+  if (em[0] & 0x80) return false;
+  db_len = nlen - 32 - 1;
+  H = em + db_len;
+  mgf1_sha256(H, 32, dbmask, db_len);
+  for (i = 0; i < db_len; i++) db[i] = em[i] ^ dbmask[i];
+  db[0] &= 0x7f; // DB = 0x00^(db_len-salt_len-1) || 0x01 || salt(salt_Len)
+  bad = 0;
+  for (i = 0; i < db_len - 32 - 1; i++) bad |= db[i];
+  bad |= db[db_len - 32 - 1] ^ 0x01;
+  if (bad != 0) return false;
+  salt = db + db_len - 32;
+  memset(Mprime, 0, 8);
+  memcpy(Mprime + 8, mhash, 32);
+  memcpy(Mprime + 8 + 32, salt, 32);
+  mg_sha256(Hprime, Mprime, sizeof(Mprime));
+  bad = 0;
+  for (i = 0; i < 32; i++) bad |= Hprime[i] ^ H[i];
+  return (bad == 0);
+}
+
+bool mg_rsa_verify(const uint8_t *em, size_t nlen, const uint8_t *mhash) {
+  return pss_verify_sha256(em, nlen, mhash);
+}
+
+// Full RSASSA-PKCS1-v1_5-VERIFY for rsa_pkcs1_sha256/sha384 (RFC 8017 9.2)
+// em      - output of RSA public-key primitive (nlen bytes)
+// nlen    - modulus byte length
+// hash    - SHA-256 or SHA-384 of the certificate TBS data
+// hashlen - hash length, 32 for SHA-256 or 48 for SHA-384
+static bool pkcs1_v15_verify(const uint8_t *em, size_t nlen,
+                             const uint8_t *hash, size_t hashlen) {
+  static const uint8_t sha256_di[] = {
+      0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+      0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20};
+  static const uint8_t sha384_di[] = {
+      0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+      0x65, 0x03, 0x04, 0x02, 0x02, 0x05, 0x00, 0x04, 0x30};
+  const uint8_t *di = hashlen == 32 ? sha256_di : sha384_di;
+  size_t disz = hashlen == 32 ? sizeof(sha256_di) : sizeof(sha384_di);
+  size_t pslen, i;
+  uint8_t bad = 0;
+
+  if (hashlen != 32 && hashlen != 48) return false;
+  if (nlen < 3 + 8 + disz + hashlen) return false;
+  pslen = nlen - 3 - disz - hashlen;
+
+  bad |= (uint8_t) (em[0] | (em[1] ^ 0x01));
+  for (i = 0; i < pslen; i++) bad |= (uint8_t) (em[2 + i] ^ 0xff);
+  bad |= em[2 + pslen];
+  for (i = 0; i < disz; i++) bad |= (uint8_t) (em[3 + pslen + i] ^ di[i]);
+  for (i = 0; i < hashlen; i++)
+    bad |= (uint8_t) (em[3 + pslen + disz + i] ^ hash[i]);
+
+  return bad == 0;
+}
+
+bool mg_rsa_pkcs_verify(const uint8_t *em, size_t nlen, const uint8_t *hash,
+                        size_t hashlen) {
+  return pkcs1_v15_verify(em, nlen, hash, hashlen);
 }
 
 #endif /* MG_TLS == MG_TLS_BUILTIN */

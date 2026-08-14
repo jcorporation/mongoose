@@ -51,7 +51,7 @@ void mg_l2_eth_init(struct mg_tcpip_if *ifp) {
     MG_INFO(
         ("MAC not set. Generated random: %M", mg_print_mac, l2addr->addr.mac));
   }
-  ifp->mtu = 1500;
+  ifp->l2mtu = 1500;
   ifp->framesize = 1540;
 }
 
@@ -94,6 +94,13 @@ size_t mg_l2_eth_trailer(struct mg_tcpip_if *ifp, size_t len, uint8_t *cur) {
 struct mg_l2addr *mg_l2_eth_mapip(enum mg_l2addrtype addrtype,
                                   struct mg_addr *addr);
 
+// Read an unaligned little-endian value from byte pointer p into a native integer.
+// Safe on architectures that forbid unaligned access (e.g. Cortex-M0).
+#define MG_LOAD_LE32(p)                           \
+  ((uint32_t) (((uint32_t) MG_U8P(p)[3] << 24U) | \
+               ((uint32_t) MG_U8P(p)[2] << 16U) | \
+               ((uint32_t) MG_U8P(p)[1] << 8U) | MG_U8P(p)[0]))
+
 bool mg_l2_eth_rx(struct mg_tcpip_if *ifp, enum mg_l2proto *proto,
                   struct mg_str *pay, struct mg_str *raw) {
   struct eth *eth = (struct eth *) raw->buf;
@@ -109,7 +116,7 @@ bool mg_l2_eth_rx(struct mg_tcpip_if *ifp, enum mg_l2proto *proto,
   } else {  // We do, check 802.1Q tag
     struct qtag *qtag = (struct qtag *) &eth->type;
     if (qtag->tpid != mg_htons(0x8100)) return false;  // Untagged frame
-    if (mg_ntohs(VLAN_ID(qtag->tci)) != VLAN_ID(d->vlan_id))
+    if (VLAN_ID(mg_ntohs(qtag->tci)) != VLAN_ID(d->vlan_id))
       return false;  // Not our VLAN
     type = MG_LOAD_BE16(qtag + 1);
   }
@@ -119,10 +126,11 @@ bool mg_l2_eth_rx(struct mg_tcpip_if *ifp, enum mg_l2proto *proto,
              sizeof(eth->dst)) != 0)
     return false;  // TODO(): add multicast addresses
   if (ifp->enable_fcs_check && len > hdrlen + 4) {
-    uint32_t crc;
-    len -= 4;  // TODO(scaprile): check on bigendian
+    uint32_t crc, crc_rx;
+    len -= 4;
     crc = mg_crc32(0, (const char *) raw->buf, len);
-    if (memcmp((void *) ((size_t) raw->buf + len), &crc, sizeof(crc)))
+    crc_rx = MG_LOAD_LE32(raw->buf + len);
+    if (crc_rx != crc)
       return false;
   }
   pay->buf = ((char *) eth) + hdrlen;
@@ -130,7 +138,7 @@ bool mg_l2_eth_rx(struct mg_tcpip_if *ifp, enum mg_l2proto *proto,
   for (i = 0; i < sizeof(eth_types) / sizeof(uint16_t); i++) {
     if (type == eth_types[i]) break;
   }
-  if (i == sizeof(eth_types)) {
+  if (i == sizeof(eth_types) / sizeof(eth_types[0])) {
     MG_DEBUG(("Unknown eth type %x", type));
     if (mg_log_level >= MG_LL_VERBOSE)
       mg_hexdump(raw->buf, raw->len >= 32 ? 32 : raw->len);

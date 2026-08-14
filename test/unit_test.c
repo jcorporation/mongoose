@@ -301,6 +301,13 @@ static void test_base64(void) {
   ASSERT(mg_base64_decode("AAA=", 4, buf, 2) == 0);
   ASSERT(mg_base64_decode("AAA=", 4, buf, 3) == 0);
   ASSERT(mg_base64_decode("AAA=", 4, buf, 4) == 2);
+
+  ASSERT(mg_base64url_encode((uint8_t *) "???", 3, buf, sizeof(buf)) == 4);
+  ASSERT(strcmp(buf, "Pz8_") == 0);
+  ASSERT(mg_base64url_decode("Pz8_", 4, buf, sizeof(buf)) == 3);
+  ASSERT(strcmp(buf, "???") == 0);
+  ASSERT(mg_base64url_decode("Pz8/", 4, buf, sizeof(buf)) == 0);
+  ASSERT(mg_base64url_decode("A", 1, buf, sizeof(buf)) == 0);
 }
 
 static void test_iobuf(void) {
@@ -339,7 +346,7 @@ static void sntp_cb(struct mg_connection *c, int ev, void *ev_data) {
     int64_t received = *(int64_t *) ev_data;
     *(int64_t *) c->fn_data = received;
     MG_DEBUG(("got time: %lld", received));
-#if MG_ARCH == MG_ARCH_UNIX
+#if MG_ARCH == MG_ARCH_UNIX && defined(__STDC__) && defined(__STDC_VERSION__)
     struct timeval tv = {0, 0};
     gettimeofday(&tv, 0);
     int64_t ms = (int64_t) tv.tv_sec * 1000 + tv.tv_usec / 1000;
@@ -1267,10 +1274,17 @@ static void test_http_server(void) {
   }
 
   // Directory listing
-  fetch(&mgr, buf, url, "GET /dirtest/ HTTP/1.0\n\n");
+#if MG_ARCH == MG_ARCH_UNIX
+ASSERT(system("touch 'dirtest/a<b&c>.txt'") == 0);
+#endif
   ASSERT(fetch(&mgr, buf, url, "GET /dirtest/ HTTP/1.0\n\n") == 200);
+  MG_DEBUG(("%s", buf));
   ASSERT(mgstrstr(mg_str(buf), mg_str(">Index of /dirtest/<")) != NULL);
   ASSERT(mgstrstr(mg_str(buf), mg_str(">fuzz.c<")) != NULL);
+#if MG_ARCH == MG_ARCH_UNIX
+  ASSERT(mgstrstr(mg_str(buf), mg_str(">a&lt;b&amp;c&gt;.txt<")) != NULL);
+  if (system("rm 'dirtest/a<b&c>.txt'") == 0) (void) 0;
+#endif
   ASSERT(cmpheader(buf, "A", "B"));
   ASSERT(!cmpheader(buf, "C", "D"));
   ASSERT(cmpheader(buf, "E", "F"));
@@ -1455,7 +1469,7 @@ static void test_tls(void) {
   const char *url = "https://localhost:12347";
   char buf[FETCH_BUF_SIZE];
   struct mg_tls_opts opts;
-  struct mg_str data = mg_unpacked("/Makefile");
+  struct mg_str data = mg_unpacked("/fuzz.c");
   char bigdata[FETCH_BUF_SIZE - 256];  // leave extra room
   struct mg_str bd;
   ASSERT(data.buf != NULL && data.len > 0);
@@ -1498,6 +1512,7 @@ static void test_tls(void) {
     // otherwise it will end with 200 and shorter file contents
     ASSERT(fetch(&mgr, buf, "https://localhost:8443",
                  "GET /thefile HTTP/1.0\n\n") == 200);
+    data = mg_unpacked("/Makefile");
     ASSERT(cmpbody(buf, data.buf) == 0);  // "thefile" links to Makefile
     ASSERT(system("killall tls_multirec/server") == 0);
   } else {
@@ -1605,9 +1620,8 @@ static void test_http_client(void) {
   opts.name = mg_url_host(url);
 
   // Test empty CA
-  // Disable mbedTLS: https://github.com/Mbed-TLS/mbedtls/issues/7075
-#if MG_TLS != MG_TLS_MBED
   opts.ca = mg_str("");
+  opts.name = mg_url_host(url);
   c = mg_http_connect(&mgr, url, f3, &ok);
   mg_tls_init(c, &opts);
   ok = 0;
@@ -1615,7 +1629,21 @@ static void test_http_client(void) {
   MG_INFO(("OK: %d", ok));
   ASSERT(ok == 200);
   mg_mgr_poll(&mgr, 1);
+  // Make host validation fail
+  c = mg_http_connect(&mgr, url, f3, &ok);
+  ASSERT(c != NULL);
+  opts.name = mg_str("dummy");  // Set some invalid hostname value
+  mg_tls_init(c, &opts);
+  ok = 0;
+  for (i = 0; i < 500 && ok <= 0; i++) mg_mgr_poll(&mgr, 10);
+  MG_INFO(("OK: %d", ok));
+#if MG_TLS != MG_TLS_MBED || !defined(MBEDTLS_VERSION_NUMBER) || \
+    MBEDTLS_VERSION_NUMBER < 0x03030000 ||                       \
+    MBEDTLS_VERSION_NUMBER >= 0x04000000
+  // Ignore result for 3.3.0 <= mbedTLS < 4.0.0 : https://github.com/Mbed-TLS/mbedtls/issues/7075
+  ASSERT(ok == 777);
 #endif
+  mg_mgr_poll(&mgr, 1);
 #endif
 
 #if MG_ENABLE_IPV6
@@ -1747,6 +1775,14 @@ static void test_http_parse(void) {
     ASSERT(mg_http_parse(s, strlen(s), &req) == (int) strlen(s));
     ASSERT(req.message.len == strlen(s));
     ASSERT(req.body.len == 0);
+  }
+
+  {
+    const char *s = "GET / HTTP/1.0\r\nHost: test\r\n"
+                      "Transfer-Encoding: chunked\r\n\r\n";
+    mg_http_parse(s, strlen(s), &req);
+    ASSERT(req.proto.len == 8 &&
+      mg_strcmp(req.proto, mg_str("HTTP/1.0")) == 0);
   }
 
   {
@@ -1979,10 +2015,25 @@ static void test_http_parse(void) {
   {
     // Test that query-string gets stripped
     struct mg_http_message hm;
-    const char *s = "GET /foo?bar HTTP/1.0\n\n";
+    const char *s = "GET /foo?bar HTTP/1.1\n\n";
     ASSERT(mg_http_parse(s, strlen(s), &hm) == (int) strlen(s));
     ASSERT(mg_strcmp(hm.uri, mg_str("/foo")) == 0);
     ASSERT(mg_strcmp(hm.query, mg_str("bar")) == 0);
+    s = "POST / HTTP/1.1\r\nHost: t\r\n"
+        "Content-Length: 5\r\nContent-Length: 10\r\n\r\n";
+    ASSERT(mg_http_parse(s, strlen(s), &req) == -1);
+
+    s = "POST / HTTP/1.1\r\nHost: t\r\n"
+        "Transfer-Encoding: chunked\r\nTransfer-Encoding: identity\r\n\r\n";
+    ASSERT(mg_http_parse(s, strlen(s), &req) == -1);
+
+    s = "POST / HTTP/1.1\r\nHost: t\r\n"
+        "Content-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n";
+    ASSERT(mg_http_parse(s, strlen(s), &req) == -1);
+
+    s = "POST / HTTP/1.1\r\nHost: t\r\n"
+        "Transfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n";
+    ASSERT(mg_http_parse(s, strlen(s), &req) == -1);
   }
 }
 
@@ -2278,6 +2329,19 @@ static void test_str(void) {
     ASSERT(chkdbl(mg_str("123e-3"), 0.123));
   }
 
+#if defined(NO_ZU_TEST) || (defined(_MSC_VER) && _MSC_VER < 1700)
+  // VC98 does not have '%zu', some old compilers may also not support it
+#else
+  ASSERT(sn("%zu", 0));
+  ASSERT(sn("%zu", -1));
+  ASSERT(sn("%zu", -2));
+  ASSERT(sn("%zd", 123));
+#if !defined(_MSC_VER)
+  ASSERT(sn("%zd", -3));  // MSVC casts to unsigned
+#endif
+  ASSERT(sn("%zu", 0x1234));
+#endif
+
   ASSERT(sn("%d", 0));
   ASSERT(sn("%d", 1));
   ASSERT(sn("%d", -1));
@@ -2450,15 +2514,23 @@ static void test_str(void) {
     TESTDOUBLE("%g", -987.65432, "-987.654");
     TESTDOUBLE("%g", 0.0000000001, "1e-10");
     TESTDOUBLE("%g", 2.34567e-57, "2.34567e-57");
-    TESTDOUBLE("%.*g", DBLWIDTH(7, 9999999.0), "9999999");
-    TESTDOUBLE("%.*g", DBLWIDTH(10, 0.123456333), "0.123456333");
+    TESTDOUBLE("%g", -2.34567e-57, "-2.34567e-57");
     TESTDOUBLE("%g", 123.456222, "123.456");
-    TESTDOUBLE("%.*g", DBLWIDTH(10, 123.456222), "123.456222");
     TESTDOUBLE("%g", 600.1234, "600.123");
     TESTDOUBLE("%g", -600.1234, "-600.123");
     TESTDOUBLE("%g", 599.1234, "599.123");
     TESTDOUBLE("%g", -599.1234, "-599.123");
     TESTDOUBLE("%g", 0.14, "0.14");
+    TESTDOUBLE("%.*g", DBLWIDTH(7, 9999999.0), "9999999");
+    TESTDOUBLE("%.*g", DBLWIDTH(10, 0.123456333), "0.123456333");
+    TESTDOUBLE("%.*g", DBLWIDTH(10, 123.456222), "123.456222");
+    TESTDOUBLE("%.*g", DBLWIDTH(10, 1e11), "1e+11"); // e > width
+    TESTDOUBLE("%.*g", DBLWIDTH(10, -1e11), "-1e+11"); // -e < -width
+    {
+      struct mg_iobuf io = {0, 0, 0, 16};
+      mg_xprintf(mg_pfn_iobuf, &io, "%.*g", 88, -1e-88); // > sizeof(tmp)
+      mg_iobuf_free(&io);
+    }
     TESTDOUBLE("%f", 0.14, "0.140000");
     TESTDOUBLE("%.*f", DBLWIDTH(4, 0.14), "0.1400");
     TESTDOUBLE("%.*f", DBLWIDTH(3, 0.14), "0.140");
@@ -2554,7 +2626,18 @@ static void test_str(void) {
     ASSERT(strcmp(buf, "[164:2100:0:0:0:0:0:0]:3 7") == 0);
   }
 
-  ASSERT(mg_path_is_sane(mg_str(".")) == true);
+  {
+    char s[1] = {'.'};
+    ASSERT(mg_path_is_sane(mg_str_n(s, 1)) == true);
+  }
+  {
+    char s[2] = {'/', '.'}; // "/."
+    ASSERT(mg_path_is_sane(mg_str_n(s, 2)) == true);
+  }
+  {
+    char s[3] = {'a', '/', '.'}; // "a/."
+    ASSERT(mg_path_is_sane(mg_str_n(s, 3)) == true);
+  }
   ASSERT(mg_path_is_sane(mg_str("")) == true);
   ASSERT(mg_path_is_sane(mg_str("a.b")) == true);
   ASSERT(mg_path_is_sane(mg_str("a..b")) == true);
@@ -2570,6 +2653,7 @@ static void test_str(void) {
   ASSERT(mg_path_is_sane(mg_str("a/../b")) == false);
   ASSERT(mg_path_is_sane(mg_str_n("a/..", 2)) == true);
   ASSERT(mg_path_is_sane(mg_str_n("a/../b", 2)) == true);
+  ASSERT(mg_path_is_sane(mg_str_n("a\0/../b", 7)) == false);
 }
 
 static void fn1(struct mg_connection *c, int ev, void *ev_data) {
@@ -2709,6 +2793,11 @@ static void test_util(void) {
          ((uint8_t *) &ipv4)[2] == 0x45);
   ASSERT(MG_LOAD_BE24(&ipv4) == 0xef2345);
 
+  ASSERT(mg_timegm(2023, 1, 1, 0, 0, 0) == 1672531200);
+  ASSERT(mg_timegm(2025, 12, 31, 23, 59, 59) == 1767225599);
+  ASSERT(mg_timegm(2024, 2, 1, 0, 0, 0) == 1706745600);
+  ASSERT(mg_timegm(2000, 4, 1, 0, 0, 0) == 954547200);
+
   memcpy(&ipv3, d64, sizeof(ipv3));
 #if defined(_MSC_VER) && _MSC_VER < 1700
   // VC98 doesn't suppport LL suffix
@@ -2765,6 +2854,13 @@ static void test_util(void) {
   ASSERT(a.is_ip6 == true);
   e = "\x20\x01\x48\x60\x48\x60\x00\x00\x00\x00\x00\x00\x00\x00\x88\x88";
   ASSERT(memcmp(&a.addr.ip6, e, sizeof(a.addr.ip6)) == 0);
+
+  ASSERT(mg_aton(mg_str("12345::1"), &a) == false);
+  ASSERT(mg_aton(mg_str("1:::2"), &a) == false);
+  ASSERT(mg_aton(mg_str("1::2::3"), &a) == false);
+  ASSERT(mg_aton(mg_str("1:2:3:4:5:6:7"), &a) == false);
+  ASSERT(mg_aton(mg_str("1:2:3:4:5:6:7:8:9"), &a) == false);
+  ASSERT(mg_aton(mg_str("1:2:3:4:5:6:7:g"), &a) == false);
 
   ASSERT(mg_url_decode("a=%", 3, buf, sizeof(buf), 0) < 0);
   ASSERT(mg_url_decode("&&&a=%", 6, buf, sizeof(buf), 0) < 0);
@@ -2938,9 +3034,16 @@ static void test_util(void) {
 static void test_crc32(void) {
   //  echo -n aaa | cksum -o3
   ASSERT(mg_crc32(0, 0, 0) == 0);
-  ASSERT(mg_crc32(0, "a", 1) == 3904355907);
+  ASSERT(mg_crc32(0, "a", 1) == 3904355907U);
   ASSERT(mg_crc32(0, "abc", 3) == 891568578);
   ASSERT(mg_crc32(mg_crc32(0, "ab", 2), "c", 1) == 891568578);
+}
+
+static void test_crc16(void) {
+  ASSERT(mg_crc16(0, 0, 0) == 0);
+  ASSERT(mg_crc16(0, "a", 1) == 0x82f7);
+  ASSERT(mg_crc16(0, "abc", 3) == 0x9e25);
+  ASSERT(mg_crc16(mg_crc16(0, "ab", 2), "c", 1) == 0x9e25);
 }
 
 static void us(struct mg_connection *c, int ev, void *ev_data) {
@@ -2962,7 +3065,7 @@ static void uc(struct mg_connection *c, int ev, void *ev_data) {
     // c->is_hexdumping = 1;
   } else if (ev == MG_EV_CONNECT) {
     mg_printf(c,
-              "POST /upload HTTP/1.0\r\n"
+              "POST /upload HTTP/1.1\r\n"
               "Transfer-Encoding: chunked\r\n\r\n");
     mg_http_printf_chunk(c, "%s", "foo\n");
     mg_http_printf_chunk(c, "%s", "bar\n");
@@ -3110,7 +3213,7 @@ static void test_http_chunked_case(mg_event_handler_t s, mg_event_handler_t c,
   struct mg_mgr mgr;
   uint32_t i, crc = 0, expected_crc = mg_crc32(0, expected, strlen(expected));
   struct mg_connection *conn;
-  static uint16_t port = 32344;  // To prevent bind errors on Windows
+  static uint16_t port = 32344;  // To prevent bind errors on Windows 
   mg_snprintf(url, sizeof(url), "http://127.0.0.1:%d", port++);
   mg_mgr_init(&mgr);
   mg_http_listen(&mgr, url, s, NULL);
@@ -3260,7 +3363,19 @@ static void test_multipart(void) {
       "hello world\r\n"
       "\r\n"
       "--xyz--\r\n";
+  const char *bad_multipart =
+    "--xyz\r\n"
+      "Content-Disposition: form-data; name=\"foo\"; filename=\"safe\rname.txt\"\r\n"
+      "Content-Type: text/plain\r\n"
+      "\r\n"
+      "hello\r\n"
+      "--xyz--\r\n";
   ASSERT(mg_http_next_multipart(mg_str(""), 0, NULL) == 0);
+  ASSERT(mg_http_next_multipart(mg_str(bad_multipart), 0, &part) > 0);
+  ASSERT(mg_strcmp(part.name, mg_str("foo")) == 0);
+  ASSERT(mg_strcmp(part.filename, mg_str("safe\rname.txt")) == 0);
+  ASSERT(mg_strcmp(part.body, mg_str("hello")) == 0);
+
   ASSERT((ofs = mg_http_next_multipart(mg_str(s), 0, &part)) > 0);
   ASSERT(mg_strcmp(part.name, mg_str("val")) == 0);
   // MG_INFO(("--> [%.*s]", (int) part.body.len, part.body.buf));
@@ -3475,9 +3590,13 @@ static void test_rewrites(void) {
 static void test_get_header_var(void) {
   struct mg_str empty = mg_str(""), bar = mg_str("bar"), baz = mg_str("baz");
   struct mg_str header = mg_str("Digest foo=\"bar\", blah,boo=baz, x=\"yy\"");
+  struct mg_str bad_header = mg_str("Digest foo=\"bar");
   struct mg_str yy = mg_str("yy");
   // struct mg_str x = mg_http_get_header_var(header, mg_str("x"));
   // MG_INFO(("--> [%d] [%d]", (int) x.len, yy.len));
+  struct mg_str bad_value = mg_http_get_header_var(bad_header, mg_str("foo"));
+  ASSERT(bad_value.len == 4);
+  ASSERT(mg_strcmp(mg_str("\"bar"), bad_value) == 0);
   ASSERT(mg_strcmp(empty, mg_http_get_header_var(empty, empty)) == 0);
   ASSERT(mg_strcmp(empty, mg_http_get_header_var(header, empty)) == 0);
   ASSERT(mg_strcmp(empty, mg_http_get_header_var(header, mg_str("fooo"))) == 0);
@@ -3648,12 +3767,22 @@ static void test_json(void) {
     ASSERT(b == true);
     ASSERT(mg_json_get(json, "$.b[2]", &len) < 0);
 
-    json = mg_str("[\"YWJj\", \"0100026869\"]");
+    json = mg_str("[\"YWJj\", \"0100026869\", \"\", \"abc\", \"0g\"]");
     ASSERT((str = mg_json_get_b64(json, "$[0]", &len)) != NULL);
     ASSERT(len == 3 && memcmp(str, "abc", (size_t) len) == 0);
     mg_free(str);
     ASSERT((str = mg_json_get_hex(json, "$[1]", &len)) != NULL);
     ASSERT(len == 5 && memcmp(str, "\x01\x00\x02hi", (size_t) len) == 0);
+    mg_free(str);
+    ASSERT((str = mg_json_get_hex(json, "$[2]", &len)) != NULL);
+    ASSERT(len == 0 && str[0] == '\0');
+    mg_free(str);
+    len = 42;
+    str = mg_json_get_hex(json, "$[3]", &len);
+    ASSERT(str == NULL && len == 42);
+    mg_free(str);
+    str = mg_json_get_hex(json, "$[4]", &len);
+    ASSERT(str == NULL && len == 42);
     mg_free(str);
 
     json = mg_str("{\"a\":[1,2,3], \"ab\": 2}");
@@ -3864,8 +3993,7 @@ static void test_poll(void) {
   int count = 0, i;
   struct mg_mgr mgr;
   mg_mgr_init(&mgr);
-  mg_http_listen(&mgr, "http://127.0.0.1:42346", ph,
-                 &count);  // To prevent bind errors on Windows
+  mg_http_listen(&mgr, "http://127.0.0.1:12340", ph, &count);
   for (i = 0; i < 10; i++) mg_mgr_poll(&mgr, 0);
   ASSERT(count == 10);
   mg_mgr_free(&mgr);
@@ -4122,57 +4250,238 @@ static void test_x25519(void) {
 
 static void test_rsa(void) {
 #if MG_TLS == MG_TLS_BUILTIN
-  const unsigned char mod[] = {
-      0x00, 0xba, 0xee, 0x3b, 0x0b, 0x89, 0x58, 0xa6, 0x19, 0x0d, 0x4c, 0x89,
-      0x1a, 0x85, 0x9a, 0xf4, 0x55, 0xc2, 0xdd, 0x0d, 0xd4, 0x4a, 0xf5, 0xed,
-      0xda, 0x28, 0x55, 0x2f, 0x64, 0x46, 0x21, 0x9f, 0x46, 0x5c, 0xfa, 0x37,
-      0x88, 0x11, 0xdf, 0xcb, 0x51, 0x73, 0x42, 0x3d, 0x5e, 0x50, 0xde, 0x11,
-      0x30, 0x61, 0x04, 0x59, 0xd0, 0xf4, 0x57, 0xed, 0x13, 0x90, 0x32, 0xc5,
-      0x3f, 0xe6, 0x66, 0xfc, 0x2a, 0x12, 0xa3, 0x1f, 0xd1, 0x77, 0x21, 0x65,
-      0xdf, 0x9a, 0xcf, 0x04, 0x05, 0xc3, 0x1c, 0xf8, 0x79, 0xb5, 0xf5, 0x97,
-      0x68, 0x98, 0x2e, 0x96, 0x85, 0x3f, 0xee, 0x71, 0x91, 0xc1, 0x54, 0x71,
-      0x9a, 0x80, 0x1f, 0xbe, 0x21, 0xd9, 0xc1, 0x80, 0x9b, 0xd0, 0x5d, 0xb3,
-      0x76, 0x3e, 0xcc, 0x14, 0x3d, 0xec, 0xb7, 0x18, 0x74, 0xfb, 0xc4, 0x0e,
-      0x56, 0x8d, 0x3d, 0x78, 0xe6, 0xca, 0xcd, 0x9d, 0xc6, 0x20, 0x5a, 0xeb,
-      0x9b, 0xc8, 0x19, 0x5e, 0xeb, 0x80, 0xd2, 0xb2, 0xfe, 0x88, 0x15, 0x5c,
-      0x7c, 0x6b, 0x26, 0xe0, 0x43, 0xda, 0xa4, 0x07, 0x85, 0x73, 0xc4, 0x80,
-      0x28, 0xcb, 0xda, 0x18, 0x56, 0x37, 0x91, 0xd6, 0x41, 0xa1, 0x0b, 0xa2,
-      0x77, 0xd0, 0x62, 0x31, 0xc7, 0xc2, 0x67, 0x6d, 0x75, 0x08, 0x80, 0xe7,
-      0xb6, 0xbe, 0xc2, 0x25, 0xc9, 0xe0, 0x2c, 0x02, 0xbf, 0x39, 0x61, 0x7e,
-      0x32, 0xa4, 0xc9, 0xe7, 0x91, 0xe3, 0xa0, 0xcd, 0x94, 0x24, 0xbf, 0x8c,
-      0xeb, 0x47, 0x76, 0x53, 0x85, 0xb3, 0xb7, 0x31, 0x80, 0x3c, 0x77, 0x10,
-      0x69, 0xc3, 0x04, 0xd1, 0x60, 0x4c, 0x74, 0xda, 0x15, 0x18, 0x0b, 0x20,
-      0x6f, 0xb3, 0x03, 0x58, 0x4a, 0xfc, 0xd1, 0xd2, 0xcf, 0x37, 0x15, 0x0a,
-      0x63, 0xc8, 0xe9, 0xd5, 0x7d, 0xd5, 0xf2, 0x90, 0x78, 0x53, 0x49, 0xa9,
-      0xc5, 0x25, 0x65, 0x5c, 0x01};
-  const unsigned char exp[] = {1, 0, 1};  // 65537
-  const unsigned char sig[] = {
-      0x1e, 0xb1, 0x6a, 0xcb, 0x39, 0x63, 0x12, 0xed, 0x85, 0x62, 0x4b, 0x85,
-      0x47, 0x25, 0x67, 0xbd, 0xbd, 0x0e, 0xaa, 0x73, 0x34, 0x5f, 0x07, 0x2b,
-      0xbb, 0x4f, 0xf5, 0x21, 0x88, 0xb1, 0x04, 0x2c, 0xbb, 0x52, 0x72, 0x64,
-      0x89, 0x45, 0x50, 0x41, 0x73, 0xca, 0xda, 0x97, 0xae, 0x81, 0x89, 0x4f,
-      0x83, 0x8d, 0x48, 0x65, 0x63, 0xe7, 0x82, 0x03, 0xd2, 0x40, 0x07, 0x1c,
-      0x86, 0x58, 0xd5, 0xac, 0x89, 0xb1, 0xca, 0x5c, 0xde, 0x21, 0x06, 0x88,
-      0x88, 0x0c, 0xe1, 0x20, 0xc0, 0xdf, 0xf1, 0x92, 0x9b, 0xb8, 0xa5, 0xeb,
-      0x6d, 0x89, 0xcc, 0x5c, 0x5c, 0x24, 0x3e, 0x9b, 0x3c, 0x35, 0x32, 0xa5,
-      0x04, 0x9e, 0x8c, 0x49, 0x01, 0xee, 0xbf, 0x1f, 0x2c, 0xb0, 0x52, 0xa8,
-      0xab, 0x79, 0x11, 0xcf, 0xb5, 0x5a, 0x16, 0xa1, 0xee, 0x21, 0x6a, 0x5a,
-      0x2b, 0x14, 0xae, 0x32, 0x3c, 0xa2, 0x6c, 0xa2, 0x40, 0x0c, 0xcb, 0x9e,
-      0x8f, 0x69, 0xab, 0xd7, 0xf3, 0xd8, 0xd1, 0xfb, 0x2d, 0xfa, 0xa9, 0x13,
-      0x09, 0xbf, 0xa7, 0xca, 0xc8, 0x90, 0x74, 0x23, 0x7b, 0x3e, 0xdd, 0x81,
-      0x32, 0xa7, 0x88, 0x42, 0x56, 0x8a, 0xcb, 0xe8, 0x8f, 0xef, 0x06, 0x9f,
-      0x39, 0x7e, 0x8e, 0x24, 0x07, 0xb3, 0xae, 0x7e, 0x13, 0x6b, 0xf2, 0xf8,
-      0x35, 0xe4, 0x16, 0x3e, 0xae, 0xf2, 0x55, 0x79, 0x10, 0x39, 0xfa, 0x70,
-      0x3a, 0x1b, 0x02, 0xb3, 0x2b, 0x1d, 0x44, 0xac, 0x30, 0x81, 0xd3, 0x11,
-      0xdd, 0x34, 0x1e, 0xcd, 0x26, 0xf5, 0x89, 0xc6, 0x55, 0x23, 0x17, 0x09,
-      0xd2, 0xc1, 0xdc, 0x49, 0xf9, 0x99, 0x36, 0x2b, 0xf5, 0xae, 0x42, 0x5c,
-      0xb7, 0x80, 0xda, 0x32, 0x69, 0x28, 0xa3, 0xee, 0xb9, 0xd4, 0x90, 0xa6,
-      0xab, 0x34, 0x17, 0x5e, 0xa0, 0xd6, 0xc1, 0x54, 0xc6, 0x9c, 0x58, 0x3a,
-      0xaf, 0xbf, 0xdc, 0x64};
-  unsigned char v[256];  // 2048 bits
-  mg_rsa_mod_pow(mod, sizeof(mod), exp, sizeof(exp), sig, sizeof(sig), v,
-                 sizeof(v));
-  ASSERT(v[sizeof(v) - 1] == 0xbc);
+  static const uint8_t tv_n[256] = {
+      0xe5, 0xd5, 0x5c, 0xed, 0xa7, 0xeb, 0xdd, 0x7f, 0x2a, 0x23, 0xd3, 0x2b,
+      0xd1, 0x01, 0x4e, 0xd3, 0x06, 0x51, 0x8a, 0x7f, 0x49, 0xaa, 0x1d, 0xa0,
+      0x6b, 0xa4, 0x75, 0x2d, 0x88, 0x99, 0x12, 0x20, 0x56, 0x43, 0x4a, 0x32,
+      0x52, 0xa4, 0x92, 0x4f, 0x9e, 0xae, 0x73, 0x7e, 0x22, 0x78, 0x8e, 0xec,
+      0x64, 0x0a, 0xff, 0xeb, 0x02, 0x9e, 0xfe, 0x0c, 0xbf, 0x37, 0x4e, 0xf9,
+      0xb3, 0x71, 0x23, 0x29, 0xae, 0x22, 0xc9, 0x9e, 0xa3, 0xc9, 0x63, 0xa8,
+      0x89, 0x39, 0x89, 0xf0, 0x37, 0x27, 0x1a, 0xbf, 0x9b, 0x70, 0x35, 0xf2,
+      0x7c, 0x0f, 0x34, 0xf2, 0x80, 0x6b, 0x9b, 0x80, 0x98, 0x16, 0x64, 0xba,
+      0x7e, 0x51, 0x22, 0xe1, 0xca, 0x39, 0x8c, 0x6c, 0x0b, 0xc6, 0x6b, 0xc8,
+      0x74, 0x50, 0x84, 0x9b, 0xe3, 0xf1, 0xdb, 0xf5, 0xff, 0x7e, 0x49, 0xe8,
+      0xdc, 0x41, 0xb9, 0x25, 0x3e, 0x2d, 0xbc, 0x48, 0x8f, 0xc8, 0x6f, 0x1b,
+      0x6b, 0x8a, 0xeb, 0xdb, 0x68, 0xaa, 0x15, 0xd9, 0x5e, 0xd8, 0x11, 0x07,
+      0x03, 0xbd, 0xd2, 0xa9, 0x6f, 0xce, 0x58, 0xb1, 0xb1, 0x86, 0xff, 0x86,
+      0x6e, 0x4a, 0x81, 0x64, 0xa0, 0x6c, 0x83, 0xca, 0xfc, 0x3f, 0xfe, 0x7d,
+      0x95, 0xd6, 0x40, 0x29, 0x21, 0x5a, 0x3b, 0x5d, 0xc8, 0x93, 0xa0, 0x1d,
+      0x2c, 0x6e, 0xb6, 0xc0, 0x65, 0x15, 0x69, 0x8b, 0x67, 0x71, 0x03, 0xde,
+      0xe7, 0xcc, 0x65, 0x83, 0x0e, 0x5a, 0x9d, 0xc9, 0x0e, 0xc1, 0xc7, 0xc4,
+      0xf3, 0x47, 0x1e, 0x9d, 0xce, 0x9d, 0xaf, 0x8b, 0x5f, 0xaa, 0x35, 0xfe,
+      0x15, 0x59, 0xd4, 0xc1, 0xd5, 0xaa, 0x3b, 0x3a, 0x0d, 0x9a, 0x98, 0x88,
+      0x1b, 0x5e, 0xf8, 0x5b, 0x07, 0xbf, 0xdb, 0x5e, 0x88, 0x46, 0x4a, 0xde,
+      0x9a, 0x63, 0x30, 0x7b, 0x4f, 0x3f, 0xc6, 0x9b, 0x88, 0x98, 0x34, 0xbe,
+      0xfd, 0xbb, 0xf5, 0xd1};
+
+  static const uint8_t tv_e[3] = {0x01, 0x00, 0x01};
+
+  static const uint8_t tv_sig[256] = {
+      0x8f, 0xc5, 0x67, 0x8f, 0x44, 0xae, 0x2c, 0x03, 0x2b, 0xb4, 0xfb, 0xd5,
+      0x1a, 0xba, 0xc7, 0xd2, 0x7a, 0x9a, 0xaa, 0x2d, 0x31, 0x49, 0x4c, 0x73,
+      0x46, 0x38, 0x1e, 0xd6, 0xb2, 0xc0, 0x8f, 0x2f, 0x8c, 0xf6, 0xba, 0x7c,
+      0x81, 0xe4, 0xbe, 0x37, 0x09, 0xb3, 0x9a, 0xae, 0x7e, 0x06, 0xcd, 0x3a,
+      0x48, 0xc3, 0x6a, 0x7b, 0x06, 0x28, 0x70, 0x06, 0x4c, 0xd9, 0x38, 0xa8,
+      0x25, 0x7e, 0x6f, 0xdc, 0x65, 0xc0, 0x17, 0x2c, 0x7b, 0x97, 0x1e, 0x61,
+      0x00, 0xb9, 0xdf, 0xd0, 0x2b, 0x54, 0x3a, 0xff, 0x18, 0x32, 0x8e, 0x69,
+      0x5e, 0x64, 0x47, 0x68, 0xd8, 0x3a, 0x78, 0xf0, 0x91, 0x7d, 0x6b, 0xe0,
+      0xc1, 0x6b, 0x5f, 0xd8, 0x7b, 0x22, 0xd6, 0x5d, 0x3b, 0x73, 0xf2, 0x1c,
+      0x9c, 0x73, 0xb7, 0x29, 0x22, 0xaf, 0x27, 0x0c, 0xce, 0x29, 0xa1, 0x46,
+      0x09, 0x5f, 0x9a, 0x9f, 0xa5, 0x6f, 0x88, 0x65, 0x23, 0x68, 0xaf, 0x1d,
+      0x56, 0x32, 0x69, 0x6f, 0x9c, 0x2d, 0x93, 0x0d, 0x99, 0x8a, 0x39, 0x53,
+      0x82, 0x0a, 0xae, 0xe2, 0xe3, 0xf1, 0x03, 0x7a, 0xb3, 0x5b, 0x05, 0x6d,
+      0xdd, 0xbe, 0xb5, 0x0d, 0x53, 0x81, 0x93, 0x9b, 0xdb, 0xd6, 0x39, 0x61,
+      0x97, 0x0c, 0x23, 0xd3, 0x98, 0x51, 0xb1, 0xd9, 0x42, 0x1d, 0x5d, 0x29,
+      0x2b, 0x64, 0xda, 0xa9, 0x37, 0x70, 0x30, 0x77, 0xa0, 0x99, 0x8d, 0x13,
+      0x67, 0x5d, 0x68, 0x80, 0x9f, 0x68, 0x25, 0x30, 0x50, 0x31, 0xe3, 0xed,
+      0xd2, 0xa2, 0xa0, 0xfc, 0xf7, 0xb4, 0x85, 0xbf, 0x68, 0xdc, 0x14, 0xbc,
+      0xeb, 0xd7, 0x9f, 0x7a, 0x6a, 0xb1, 0x9c, 0x8b, 0xf5, 0xff, 0xc1, 0x5a,
+      0xf7, 0xaf, 0x52, 0x88, 0x0e, 0xf2, 0x5c, 0x10, 0x02, 0x35, 0xe2, 0xcc,
+      0xd9, 0x2b, 0x20, 0x80, 0xc2, 0xb9, 0xfa, 0x5f, 0xbd, 0xc6, 0xd2, 0xd7,
+      0xc1, 0xe3, 0xcd, 0x59};
+
+  static const uint8_t tv_em[256] = {
+      0x17, 0x08, 0xf4, 0xe4, 0x67, 0x2b, 0xa9, 0x3b, 0x34, 0x13, 0x96, 0xeb,
+      0xd1, 0x14, 0xf1, 0x90, 0x4c, 0x6f, 0xc9, 0xec, 0xa0, 0x85, 0xa8, 0xa6,
+      0x89, 0xe4, 0xd4, 0x48, 0x41, 0x5b, 0x6b, 0x1c, 0x79, 0xce, 0x87, 0xdb,
+      0x12, 0x45, 0x97, 0x3b, 0x37, 0xd9, 0xd6, 0xe9, 0x7e, 0x6e, 0xcf, 0xb2,
+      0x84, 0x47, 0xe4, 0xda, 0x6c, 0x53, 0xfd, 0xe3, 0x18, 0x0c, 0xa7, 0xd4,
+      0x70, 0xc6, 0xd5, 0xd9, 0xc2, 0xbb, 0x08, 0xfd, 0xf4, 0x56, 0x66, 0x21,
+      0x68, 0xb5, 0xb5, 0x4c, 0x9b, 0x1d, 0xdb, 0xac, 0xa0, 0xc4, 0x64, 0x1e,
+      0xee, 0x1b, 0xe0, 0xc8, 0x84, 0xc5, 0xa9, 0xd0, 0x50, 0xd8, 0xb6, 0xd2,
+      0xb5, 0x1f, 0xbc, 0xf7, 0x01, 0xd2, 0x53, 0x44, 0xc9, 0x1c, 0xae, 0x45,
+      0x28, 0xbd, 0xbe, 0x28, 0x6e, 0xb9, 0x06, 0xd6, 0xc9, 0xcd, 0x5a, 0xdd,
+      0x31, 0x99, 0x56, 0x22, 0xf0, 0xd7, 0xa4, 0xb3, 0x38, 0x04, 0xcc, 0x7f,
+      0x45, 0xba, 0x05, 0x26, 0xf9, 0x34, 0x50, 0xb4, 0xcf, 0xf3, 0x81, 0xb7,
+      0xf9, 0xf1, 0x2a, 0xbc, 0x2e, 0xe1, 0x51, 0x12, 0x23, 0x5a, 0xec, 0xe8,
+      0x59, 0x1b, 0xb2, 0x58, 0x6e, 0x17, 0x3c, 0x9e, 0x3a, 0x24, 0xf2, 0x7d,
+      0xd8, 0xfa, 0x82, 0xf5, 0x30, 0x13, 0x53, 0xf5, 0x6e, 0x08, 0xdd, 0x0d,
+      0x92, 0x24, 0x84, 0x02, 0x7b, 0x64, 0x55, 0x1c, 0xda, 0xf4, 0xb7, 0xc1,
+      0x35, 0x87, 0xd2, 0x79, 0xf4, 0x34, 0xc3, 0xb7, 0x58, 0xdb, 0x8b, 0x82,
+      0x71, 0x49, 0xc1, 0x85, 0x7f, 0x56, 0x8a, 0xf7, 0xaf, 0xbb, 0xd6, 0x38,
+      0x38, 0x34, 0x4b, 0x93, 0xe9, 0x77, 0x37, 0xd0, 0x9c, 0xd2, 0xe0, 0x76,
+      0x6f, 0xa2, 0x20, 0x2e, 0x0a, 0x2e, 0x48, 0x5e, 0xa2, 0x83, 0xd2, 0xfa,
+      0xc2, 0xc8, 0xd9, 0xa7, 0xcd, 0x7b, 0xb3, 0x78, 0x30, 0x46, 0x7e, 0x83,
+      0xbc, 0x11, 0x40, 0xbc};
+
+  static const uint8_t tv_mhash[32] = {
+      0x21, 0x83, 0x9d, 0xb5, 0x7b, 0xe2, 0x84, 0xc2, 0x31, 0xf7, 0xb6,
+      0xa1, 0x90, 0x9b, 0x53, 0x99, 0x5f, 0x09, 0x1b, 0x84, 0xf7, 0x35,
+      0x57, 0xbb, 0xbb, 0xef, 0x7f, 0x7b, 0x93, 0xe8, 0xef, 0x16};
+
+  ASSERT(mg_rsa_verify(tv_em, 256, tv_mhash));
+  {
+    uint8_t em[256];
+    int r = mg_rsa_mod_pow(tv_n, sizeof(tv_n), tv_e, sizeof(tv_e), tv_sig,
+                           sizeof(tv_sig), em, sizeof(em));
+    ASSERT(r == 0);
+    ASSERT(memcmp(em, tv_em, 256) == 0);
+    ASSERT(mg_rsa_verify(em, 256, tv_mhash));
+  }
+
+  {
+    uint8_t mhash[32];
+    uint8_t em[256];
+    memcpy(mhash, tv_mhash, 32);
+    memcpy(em, tv_em, 256);
+    mhash[0] ^= 0x01;  // wrong mhash
+    ASSERT(!mg_rsa_verify(tv_em, 256, mhash));
+    mhash[0] = tv_mhash[0];
+    em[255] ^= 0x01;  // bad trailer
+    ASSERT(!mg_rsa_verify(em, 256, tv_mhash));
+    em[255] = tv_em[255];
+    em[0] |= 0x80;  // top bit set
+    ASSERT(!mg_rsa_verify(em, 256, tv_mhash));
+    em[0] = tv_em[0];
+    em[223] ^= 0xFF;  // corrupt h field
+    ASSERT(!mg_rsa_verify(em, 256, tv_mhash));
+    em[223] = tv_em[223];
+    em[50] ^= 0x01;  // corrupt zero padding
+    ASSERT(!mg_rsa_verify(em, 256, tv_mhash));
+    em[50] = tv_em[50];
+  }
+  {
+    static const uint8_t sha256_di[] = {
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+        0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20};
+    static const uint8_t sha384_di[] = {
+        0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01,
+        0x65, 0x03, 0x04, 0x02, 0x02, 0x05, 0x00, 0x04, 0x30};
+    uint8_t hash[48], em[256];
+    size_t i, pslen;
+
+    for (i = 0; i < sizeof(hash); i++) hash[i] = (uint8_t) i;
+
+    memset(em, 0xff, sizeof(em));
+    em[0] = 0, em[1] = 1;
+    pslen = sizeof(em) - 3 - sizeof(sha256_di) - 32;
+    em[2 + pslen] = 0;
+    memcpy(em + 3 + pslen, sha256_di, sizeof(sha256_di));
+    memcpy(em + 3 + pslen + sizeof(sha256_di), hash, 32);
+    ASSERT(mg_rsa_pkcs_verify(em, sizeof(em), hash, 32));
+
+    em[1] = 2;  // bad block type
+    ASSERT(!mg_rsa_pkcs_verify(em, sizeof(em), hash, 32));
+    em[1] = 1;
+    em[10] = 0;  // bad padding
+    ASSERT(!mg_rsa_pkcs_verify(em, sizeof(em), hash, 32));
+    em[10] = 0xff;
+    em[3 + pslen + 15] ^= 1;  // bad DigestInfo
+    ASSERT(!mg_rsa_pkcs_verify(em, sizeof(em), hash, 32));
+    em[3 + pslen + 15] ^= 1;
+    em[sizeof(em) - 1] ^= 1;  // bad hash
+    ASSERT(!mg_rsa_pkcs_verify(em, sizeof(em), hash, 32));
+
+    memset(em, 0, sizeof(em));  // former suffix-only bypass
+    memcpy(em + sizeof(em) - 32, hash, 32);
+    ASSERT(!mg_rsa_pkcs_verify(em, sizeof(em), hash, 32));
+
+    memset(em, 0xff, sizeof(em));
+    em[0] = 0, em[1] = 1;
+    pslen = sizeof(em) - 3 - sizeof(sha384_di) - 48;
+    em[2 + pslen] = 0;
+    memcpy(em + 3 + pslen, sha384_di, sizeof(sha384_di));
+    memcpy(em + 3 + pslen + sizeof(sha384_di), hash, 48);
+    ASSERT(mg_rsa_pkcs_verify(em, sizeof(em), hash, 48));
+    ASSERT(!mg_rsa_pkcs_verify(em, sizeof(em), hash, 20));
+  }
+#endif
+}
+
+static void test_jwt(void) {
+  char jwt[512], claims[128], got[128], hdr[128], extra[64], tampered[512];
+  struct mg_jwt_opts opts, bad;
+  const char *dot;
+  char *str;
+  size_t n, m;
+
+  mg_snprintf(claims, sizeof(claims), "{%m:%m,%m:%d}", MG_ESC("sub"),
+              MG_ESC("admin"), MG_ESC("iat"), 123);
+  mg_snprintf(extra, sizeof(extra), "%m:%m", MG_ESC("cty"), MG_ESC("JWT"));
+  memset(&opts, 0, sizeof(opts));
+  opts.claims = mg_str(claims);
+  opts.header = mg_str(extra);
+  opts.kid = mg_str("hmac-key-1");
+  opts.secret = mg_str("secret");
+  n = mg_jwt_sign_hs256(&opts, jwt, sizeof(jwt));
+  ASSERT(n > 0 && n + 1 < sizeof(jwt));
+  jwt[n] = '\0';
+
+  dot = strchr(jwt, '.');
+  ASSERT(dot != NULL);
+  ASSERT(mg_base64url_decode(jwt, (size_t) (dot - jwt), hdr,
+                             sizeof(hdr)) > 0);
+  str = mg_json_get_str(mg_str(hdr), "$.kid");
+  ASSERT(str != NULL && strcmp(str, "hmac-key-1") == 0);
+  mg_free(str);
+  str = mg_json_get_str(mg_str(hdr), "$.cty");
+  ASSERT(str != NULL && strcmp(str, "JWT") == 0);
+  mg_free(str);
+
+  m = mg_jwt_verify_hs256(mg_str_n(jwt, n), &opts, got, sizeof(got));
+  ASSERT(m == strlen(claims));
+  ASSERT(strcmp(got, claims) == 0);
+  bad = opts;
+  bad.secret = mg_str("bad-secret");
+  ASSERT(mg_jwt_verify_hs256(mg_str_n(jwt, n), &bad, got,
+                             sizeof(got)) == 0);
+  memcpy(tampered, jwt, n + 1);
+  tampered[n - 1] = tampered[n - 1] == 'A' ? 'B' : 'A';
+  ASSERT(mg_jwt_verify_hs256(mg_str_n(tampered, n), &opts, got,
+                             sizeof(got)) == 0);
+  ASSERT(mg_jwt_sign_hs256(&opts, got, 10) == 0);
+  ASSERT(mg_jwt_verify_hs256(mg_str_n(jwt, n), &opts, got, 4) == 0);
+
+#if MG_TLS == MG_TLS_BUILTIN
+  {
+    const char *key_pem =
+        "-----BEGIN EC PRIVATE KEY-----\n"
+        "MHcCAQEEIAVdo8UAScxG7jiuNY2UZESNX/KPH8qJ0u0gOMMsAzYWoAoGCCqGSM49\n"
+        "AwEHoUQDQgAEqN6BIhvgbk7ecmUcn8Da9Avkj/uDNERtqWJG9r/or26X4u9jR5Jl\n"
+        "4hf5Gx17YJkq5/z3k6ogPDPpoAYWIw1/sw==\n"
+        "-----END EC PRIVATE KEY-----\n";
+    uint8_t key[32], pub[64];
+
+    memset(&opts, 0, sizeof(opts));
+    opts.claims = mg_str(claims);
+    opts.kid = mg_str("ec-key-1");
+    opts.private_key = key;
+    opts.public_key = pub;
+    ASSERT(mg_uecc_parse_private_key(mg_str(key_pem), key, sizeof(key)) == 32);
+    ASSERT(mg_uecc_compute_public_key(key, pub, mg_uecc_secp256r1()) == 1);
+    n = mg_jwt_sign_es256(&opts, jwt, sizeof(jwt));
+    ASSERT(n > 0 && n + 1 < sizeof(jwt));
+    jwt[n] = '\0';
+    m = mg_jwt_verify_es256(mg_str_n(jwt, n), &opts, got, sizeof(got));
+    ASSERT(m == strlen(claims));
+    ASSERT(strcmp(got, claims) == 0);
+    ASSERT(mg_jwt_verify_hs256(mg_str_n(jwt, n), &bad, got,
+                               sizeof(got)) == 0);
+    memcpy(tampered, jwt, n + 1);
+    tampered[n - 1] = tampered[n - 1] == 'A' ? 'B' : 'A';
+    ASSERT(mg_jwt_verify_es256(mg_str_n(tampered, n), &opts, got,
+                               sizeof(got)) == 0);
+  }
 #endif
 }
 
@@ -4183,6 +4492,7 @@ static void test_crypto(void) {
   test_sha384();
   test_x25519();
   test_rsa();
+  test_jwt();
 }
 
 static void dash_custom(struct mg_connection *c, int ev, void *ev_data) {
@@ -4297,15 +4607,15 @@ static bool set3_fn(enum mg_dash_op op, struct mg_dash_user *u) {
 static bool test_upload_dir(const struct mg_dash_user *u, char *buf, size_t len) {
   (void) u;
 #if MG_ARCH == MG_ARCH_UNIX || MG_ARCH == MG_ARCH_WIN32
-  mkdir("/tmp/mongoose_dash_test", 0755);
+  mkdir("mongoose_dash_test", 0755);
 #endif
-  mg_snprintf(buf, len, "%s", "/tmp/mongoose_dash_test");
+  mg_snprintf(buf, len, "%s", "mongoose_dash_test");
   return true;
 }
 
 struct test_file_entry {
   char name[64];
-  size_t size;
+  uint64_t size;
 };
 static struct test_file_entry s_test_file;
 static int s_test_file_index;
@@ -4463,7 +4773,7 @@ static void test_dash(void) {
 
   memset(&dash, 0, sizeof(dash));
   dash.session_auto_expiration_seconds = 1;
-  remove("/tmp/mongoose_dash_test/test.bin");
+  remove("mongoose_dash_test/test.bin");
 
   MG_DASH_ADD_FIELD_SET(&dash, &test_files_set);
   MG_DASH_ADD_FIELD_SET(&dash, &set1);
@@ -4792,6 +5102,11 @@ static void test_dash(void) {
     ASSERT(strstr(buf, test_bin_probe) != NULL);
     mg_mgr_free(&mgr3);
   }
+
+  remove("mongoose_dash_test/test.bin");
+#if MG_ARCH == MG_ARCH_UNIX || MG_ARCH == MG_ARCH_WIN32
+  rmdir("mongoose_dash_test");
+#endif
 }
 
 #define DASHBOARD(x) \
@@ -5136,7 +5451,6 @@ static void test_modbus(void) {
   mg_mgr_free(&mgr);
 }
 
-
 struct wudata {
   struct mg_mgr *mgr;
   unsigned long conn_id;  // Parent connection ID
@@ -5164,8 +5478,8 @@ static void test_wakeup(void) {
   struct wudata *data;
   int i;
   mg_mgr_init(&mgr);        // Initialise event manager
-  mg_log_set(MG_LL_DEBUG);  // Set debug log level
-  c = mg_http_listen(&mgr, "http://127.0.0.1:42347", hwu, NULL);
+  mg_log_set(MG_LL_DEBUG);
+  c = mg_http_listen(&mgr, "http://127.0.0.1:12341", hwu, NULL);
   mg_wakeup_init(&mgr);  // Initialise wakeup socket pair
   data = (struct wudata *) calloc(1, sizeof(*data));  // wuthread owns it
   data->conn_id = c->id;
@@ -5180,10 +5494,15 @@ static void test_wakeup(void) {
 #endif
 }
 
+extern uint64_t mg_boot_timestamp_ms;
+
 int main(void) {
   const char *debug_level = getenv("V");
   if (debug_level == NULL) debug_level = "3";
   mg_log_set(atoi(debug_level));
+
+  // make sure there is a time reference for mg_now() regardless of SNTP tests
+  mg_boot_timestamp_ms = (uint64_t) time(NULL) * 1000;
 
   s_error = false;
   test_modbus();
@@ -5199,6 +5518,7 @@ int main(void) {
   test_str();
   test_match();
   test_crc32();
+  test_crc16();
   DASHBOARD("misc");
 
   s_error = false;

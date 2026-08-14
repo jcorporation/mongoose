@@ -22,6 +22,9 @@ void mg_free(void *ptr);
 // sensitive data (keys, passwords).
 void mg_bzero(volatile unsigned char *buf, size_t len);
 
+// Fixed-length constant-time byte equality. Use for MACs, tags, signatures.
+bool mg_memeq(const void *a, const void *b, size_t n);
+
 // Fills buf with len cryptographically random bytes. Uses the best available
 // hardware or OS source (hardware RNG, /dev/urandom, CryptGenRandom, etc.).
 // Falls back to rand() with an error log if no strong source is available.
@@ -37,6 +40,10 @@ char *mg_random_str(char *buf, size_t len);
 // a new checksum; pass the result of a prior call to extend over more data.
 uint32_t mg_crc32(uint32_t crc, const char *buf, size_t len);
 
+// Computes CRC16 (HDLC, polynomial 0x8408) over buf/len. Pass crc=0 to start
+// a new checksum; pass the result of a prior call to extend over more data.
+uint16_t mg_crc16(uint16_t crc, const char *buf, size_t len);
+
 // Returns true if path is safe to serve from the filesystem. Rejects paths
 // that start with '~' or '..', or contain a '/../' component, to prevent
 // directory traversal attacks.
@@ -45,6 +52,9 @@ bool mg_path_is_sane(const struct mg_str path);
 // Busy-waits for at least ms milliseconds using mg_millis(). Blocks the
 // calling context; avoid in event handlers.
 void mg_delayms(unsigned int ms);
+
+uint64_t mg_timegm(unsigned int year, unsigned int month, unsigned int day,
+                   unsigned int hour, unsigned int min, unsigned int sec);
 
 // Packs four byte values into a uint32_t in big-endian order.
 // MG_U32(1, 2, 3, 4) == 0x01020304

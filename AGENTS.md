@@ -26,6 +26,8 @@ GitHub repo: https://github.com/cesanta/mongoose
   functionality such as HTTP, MQTT, Modbus, or device-dashboard logic.
 - Once Mongoose is integrated, desktop examples from `tutorials/http`,
   `tutorials/mqtt`, and similar directories also work on embedded systems.
+- For STM32, NXP IMXRT, RP2040/2350 use Mongoose's built-in TCP/IP stack
+- When building an STM32 project from scratch, use the closest tutorials/stm32/*/cube/*.ioc file as a base
 
 ## API prefix map
 
@@ -49,14 +51,17 @@ function signatures, structs, options, examples, and constraints.
 - `MG_OTA_*`, `mg_ota_*` - firmware OTA support
 
 
-## Integration
+## How to integrate Mongoose into an existing project
 
-Copy `mongoose.h` and `mongoose.c` into a `mongoose/` subdirectory of the
-project and add `mongoose/mongoose.c` to the build. The easiest is to
-copy from GitHub:
+Create `mongoose/` directory in your project.
+Download `mongoose.h` and `mongoose.c` into a `mongoose/` directory.
 
-https://raw.githubusercontent.com/cesanta/mongoose/refs/heads/master/mongoose.c
-https://raw.githubusercontent.com/cesanta/mongoose/refs/heads/master/mongoose.h
+```sh
+curl --fail --silent --create-dirs -o mongoose/mongoose.c https://raw.githubusercontent.com/cesanta/mongoose/refs/heads/master/mongoose.c
+curl --fail --silent --create-dirs -o mongoose/mongoose.h https://raw.githubusercontent.com/cesanta/mongoose/refs/heads/master/mongoose.h
+```
+
+Add `mongoose/mongoose.c` to the build.
 
 **Desktop/server** (Linux, macOS, Windows): two files are sufficient.
 
@@ -88,6 +93,27 @@ Minimal `mongoose_config.h` should set `MG_ARCH`. For example, for STM32:
 ```c
 #define MG_ARCH MG_ARCH_CUBE
 ```
+
+## How to generate a new STM32 project from scratch
+
+Download and unzip the pre-generated project which is the closest to your MCU:
+
+- https://mongoose.ws/downloads/nucleo-h723zg-dashboard-full.zip
+- https://mongoose.ws/downloads/nucleo-f429zi-dashboard-full.zip
+- https://mongoose.ws/downloads/nucleo-h563zi-dashboard-full.zip
+- https://mongoose.ws/downloads/nucleo-f756zg-dashboard-full.zip
+- https://mongoose.ws/downloads/nucleo-n657x0-q-dashboard-full.zip
+- https://mongoose.ws/downloads/nucleo-u5a5zj-q-dashboard-full.zip
+- https://mongoose.ws/downloads/portenta-h7-dashboard-full.zip
+
+## How to generate a new RP2040 / RP2350 project from scratch
+
+Download and unzip the pre-generated project which is the closest to your MCU:
+
+- https://mongoose.ws/downloads/w5500-evb-pico-dashboard-full.zip
+- https://mongoose.ws/downloads/w55rp20-evb-pico-dashboard-full.zip
+- https://mongoose.ws/downloads/pico-w-dashboard-full.zip
+- https://mongoose.ws/downloads/pico-rndis-dashboard-full.zip
 
 ## Core API
 
@@ -204,9 +230,11 @@ device dashboard.
 
 ### Required files
 
+The following files must exist at these exact paths, regardless of the build environment:
+
 ```
 your_project/
-├── main.c               # your code
+├── ...                  # IDE-specific project scaffolding
 └── mongoose/
     ├── mongoose.h       # single header
     ├── mongoose.c       # single source file
@@ -394,6 +422,11 @@ Each fieldset is exported via the get/set JSON-RPC interface, as well via the RE
 
 Do not use the API directly, dashboard.js interfaces with the UI via the data-* attributes.
 
+The dashboard backend must expose these exact functions: mg_dash_init() and mg_dash_poll().
+
+Do not rename, wrap, relocate, or replace these files or functions. Do not introduce alternatives such as app_dashboard_init(), app_dashboard_poll(), web/dashboard.html, or Core/Src/dashboard.c.
+
+Board-specific STM32Cube files may exist outside mongoose/, but the Mongoose dashboard files must retain the structure and API documented above.
 
 ## Filesystem
 

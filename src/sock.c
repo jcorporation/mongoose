@@ -112,9 +112,9 @@ void mg_getlocaddr(struct mg_connection *c, struct mg_addr *to,
   slen = tousa(to, &usa);
   if ((rc = connect(fd, &usa.sa, slen)) != 0) {
     mg_error(c, "connect: %d", MG_SOCK_ERR(rc));
-    return;
+  } else {
+    setlocaddr(fd, addr);
   }
-  setlocaddr(fd, addr);
   closesocket(fd);
 }
 
@@ -449,6 +449,7 @@ void mg_connect_resolved(struct mg_connection *c) {
     if (rc == 0) {                       // Success
       setlocaddr(FD(c), &c->loc);
       mg_call(c, MG_EV_CONNECT, NULL);   // Send MG_EV_CONNECT to the user
+      if (c->is_tls_hs) mg_tls_handshake(c);
       if (!c->is_tls_hs) c->is_tls = 0;  // user did not call mg_tls_init()
     } else if (MG_SOCK_PENDING(rc)) {    // Need to wait for TCP handshake
       MG_DEBUG(("%lu %ld -> %M pend", c->id, c->fd, mg_print_ip_port, &c->rem));
@@ -465,6 +466,14 @@ static MG_SOCKET_TYPE raccept(MG_SOCKET_TYPE sock, union usa *usa,
   do {
     memset(usa, 0, sizeof(*usa));
     fd = accept(sock, &usa->sa, len);
+#if MG_ENABLE_FREERTOS_TCP
+    // FreeRTOS_accept() returns NULL to mean "no pending connection",
+    // therefore we avoid retrying it forever on non-blocking listeners
+    if (fd == NULL) {
+      fd = MG_INVALID_SOCKET;
+      break;
+    }
+#endif
   } while (MG_SOCK_INTR(fd));
   return fd;
 }

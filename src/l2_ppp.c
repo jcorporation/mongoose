@@ -100,7 +100,7 @@ static uint8_t s_state = MG_PPPoE_ST_DISC;
 static uint16_t s_id;
 
 void mg_l2_ppp_init(struct mg_tcpip_if *ifp) {
-  ifp->mtu = 1500;
+  ifp->l2mtu = 1500;
   ifp->framesize = 1500 + sizeof(struct ppp) + sizeof(struct hdlc_);
 }
 
@@ -108,7 +108,7 @@ extern void mg_l2_eth_init(struct mg_tcpip_if *);
 
 void mg_l2_pppoe_init(struct mg_tcpip_if *ifp) {
   mg_l2_eth_init(ifp);
-  ifp->mtu = ifp->mtu - (uint16_t) (sizeof(struct pppoe) +
+  ifp->l2mtu = ifp->l2mtu - (uint16_t) (sizeof(struct pppoe) +
                                     sizeof(struct ppp));  // 1500 --> 1492
 }
 
@@ -169,30 +169,14 @@ uint8_t *mg_l2_pppoe_header(struct mg_tcpip_if *ifp, enum mg_l2proto proto,
                                            s_id, src, dst, frame));
 }
 
-// Calculate FCS/CRC for PPP frames. Could be implemented faster using lookup
-// tables.
-static uint16_t fcs_do(uint8_t *frame, size_t len) {
-  uint32_t fcs = 0xffff;
-  unsigned int j;
-  for (j = 0; j < len; j++) {
-    unsigned int i;
-    uint8_t x = frame[j];
-    for (i = 0; i < 8; i++) {
-      fcs = ((fcs ^ x) & 1) ? (fcs >> 1) ^ 0x8408 : fcs >> 1;
-      x >>= 1;
-    }
-  }
-  return (uint16_t) (fcs & 0xffff);
-}
-
 size_t mg_l2_ppp_trailer(struct mg_tcpip_if *ifp, size_t len, uint8_t *cur) {
   uint16_t crc;
   uint8_t *frame;
   len += sizeof(struct ppp) + sizeof(struct hdlc_);
   frame = cur - len;
-  crc = fcs_do(frame, len);
-  *cur++ = (uint8_t) ~crc;  // add CRC, note the byte order
-  *cur++ = (uint8_t) (~crc >> 8);
+  crc = mg_crc16(0, (const char *) frame, len);
+  *cur++ = (uint8_t) crc;  // add CRC, note the byte order
+  *cur++ = (uint8_t) (crc >> 8);
   // there is no len field in PPP
   (void) ifp;
   return len + 2;
@@ -243,6 +227,7 @@ static void ppp_handle_lcp(struct mg_tcpip_if *ifp, uint8_t *lcpp,
   if (lcpsz < sizeof(*lcp)) return;
   id = lcp->id;
   len = mg_ntohs(lcp->len);
+  if (len < sizeof(*lcp) || len > lcpsz) return;
   switch (lcp->code) {
     case MG_PPP_LCP_CFG_REQ: {
       if (len == sizeof(*lcp)) {
@@ -277,8 +262,8 @@ static void ppp_handle_lcp(struct mg_tcpip_if *ifp, uint8_t *lcpp,
 static bool find_opt(const uint8_t opt, const uint8_t optlen,
                      const uint8_t *opts, size_t optslen, uint8_t *dest) {
   uint8_t *p = (uint8_t *) opts;
-  while (optslen >= 2) {               // parse options for requested one
-    if (p[1] > optslen) return false;  // truncated / malformed
+  while (optslen >= 2) {  // parse options for requested one
+    if (p[1] > optslen || p[1] < 2) return false;  // truncated / malformed
     if (p[0] == opt && p[1] == optlen) {
       memcpy(dest, p + 2, optlen - 2);
       return true;
@@ -299,6 +284,7 @@ static void ppp_handle_ipcp(struct mg_tcpip_if *ifp, uint8_t *ipcpp,
   if (ipcpsz < sizeof(*ipcp)) return;
   id = ipcp->id;
   len = mg_ntohs(ipcp->len);
+  if (len < sizeof(*ipcp) || len > ipcpsz) return;
   switch (ipcp->code) {
     case MG_PPP_IPCP_CFG_REQ:
       MG_VERBOSE(("got IPCP config request, acknowledging..."));
@@ -358,6 +344,7 @@ static void ppp_handle_ipv6cp(struct mg_tcpip_if *ifp, uint8_t *ipv6cpp,
   if (ipv6cpsz < sizeof(*ipv6cp)) return;
   id = ipv6cp->id;
   len = mg_ntohs(ipv6cp->len);
+  if (len < sizeof(*ipv6cp) || len > ipv6cpsz) return;
   switch (ipv6cp->code) {
     case MG_PPP_IPV6CP_CFG_REQ:
       MG_VERBOSE(("got IPV6CP config request..."));
@@ -365,10 +352,10 @@ static void ppp_handle_ipv6cp(struct mg_tcpip_if *ifp, uint8_t *ipv6cpp,
           find_opt(
               MG_PPP_IPV6CP_OPT_IFCID, 10, (const uint8_t *) (ipv6cp + 1),
               len - sizeof(*ipv6cp),
-              (uint8_t *) &((struct mg_l2addr *) (ifp->gwmac))->addr.ieee64)) {
-        if (((struct mg_l2addr *) (ifp->gwmac))->addr.ieee64 != 0) {
+              (uint8_t *) &((struct mg_l2addr *) (ifp->gw6mac))->addr.ieee64)) {
+        if (((struct mg_l2addr *) (ifp->gw6mac))->addr.ieee64 != 0) {
           MG_DEBUG(("IPV6CP cfg, GW IFCID: %M", mg_print_ieee64,
-                    &((struct mg_l2addr *) (ifp->gwmac))->addr.ieee64));
+                    &((struct mg_l2addr *) (ifp->gw6mac))->addr.ieee64));
           ipv6cp->code = MG_PPP_IPV6CP_CFG_ACK;
           ppp_tx_frame(ifp, MG_PPP_PROTO_IPV6CP, ipv6cpp, len);
           req[1] = id;
@@ -392,22 +379,21 @@ static void ppp_handle_ipv6cp(struct mg_tcpip_if *ifp, uint8_t *ipv6cpp,
       // Our peer accepted our ifc id
       MG_VERBOSE(("got IPV6CP config ack"));
       break;
-    case MG_PPP_IPV6CP_CFG_NACK:
+    case MG_PPP_IPV6CP_CFG_NACK: {
+      struct mg_l2addr l2;
       MG_VERBOSE(("got IPV6CP config nack"));
       // NACK contains our "suggested" IFC id, use it
       if (len >= 10 &&
-          find_opt(
-              MG_PPP_IPV6CP_OPT_IFCID, 10, (const uint8_t *) (ipv6cp + 1),
-              len - sizeof(*ipv6cp),
-              (uint8_t *) &((struct mg_l2addr *) (ifp->mac))->addr.ieee64)) {
-        MG_DEBUG(("IPV6CP cfg, IFCID: %M", mg_print_ieee64,
-                  &((struct mg_l2addr *) (ifp->mac))->addr.ieee64));
+          find_opt(MG_PPP_IPV6CP_OPT_IFCID, 10, (const uint8_t *) (ipv6cp + 1),
+                   len - sizeof(*ipv6cp), (uint8_t *) &l2.addr.ieee64)) {
+        MG_DEBUG(("IPV6CP cfg, IFCID: %M", mg_print_ieee64, &l2.addr.ieee64));
+        ifp->ip6ll[1] = l2.addr.ieee64;  // RFC-5072 5, signal L3 we're ready
         ipv6cp->code = MG_PPP_IPV6CP_CFG_REQ;
         ppp_tx_frame(ifp, MG_PPP_PROTO_IPV6CP, ipv6cpp, len);
       } else {
         MG_ERROR(("Peer is not able to offer an interface id"));
       }
-      break;
+    } break;
     case MG_PPP_IPV6CP_CFG_REJECT:
       MG_ERROR(("Peer rejected our interface id"));
       break;
@@ -449,8 +435,9 @@ static bool ppp_rx(struct mg_tcpip_if *ifp, enum mg_l2proto *proto,
       size_t msglen;
       MG_DEBUG(("unknown %u-byte PPP frame with proto 0x%04x:",
                 pay->len + sizeof(*ppp), mg_ntohs(ppp->proto)));
-      if (mg_log_level >= MG_LL_DEBUG) mg_hexdump(ppp, sizeof(*ppp) + 20);
-      if (!s_lcpup) return false;  // RFC-1661 5.7: must reject on link up
+      if (mg_log_level >= MG_LL_DEBUG)
+        mg_hexdump(ppp, pay->len > 14 ? 16 : pay->len + sizeof(*ppp));
+      if (!s_lcpup) return false;  // RFC-1661 5.7: must reject on link down
       if (pay->len > (size_t) (ifp->mtu - 20))
         pay->len = (size_t) (ifp->mtu - 20);  // truncate to some safe limit
       rej.code = MG_PPP_LCP_REJECT;
@@ -571,10 +558,10 @@ bool mg_l2_pppoe_rx(struct mg_tcpip_if *ifp, enum mg_l2proto *proto,
       uint8_t *p = (uint8_t *) (pppoe + 1);
       uint16_t taglen;
       while (len >= 4) {  // parse tags for a possible AC-Cookie
-        uint16_t curtag = *((uint16_t *) p);
-        taglen = mg_ntohs(*(((uint16_t *) p) + 1));
+        uint16_t curtag = MG_LOAD_BE16(p);
+        taglen = MG_LOAD_BE16(p + 2);
         if (taglen > len - 4) return false;  // truncated / malformed
-        if (curtag == mg_htons(0x0104)) {
+        if (curtag == 0x0104) {
           has_cookie = true;
           break;
         }

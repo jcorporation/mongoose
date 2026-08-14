@@ -22,6 +22,7 @@
 
 #include "arch.h"
 #include "tls.h"
+#include "util.h"
 #if MG_TLS == MG_TLS_BUILTIN
 /******************************************************************************/
 #define AES_DECRYPTION 1  // whether AES decryption is supported
@@ -1009,6 +1010,7 @@ int gcm_finish(gcm_context *ctx,    // pointer to user-provided GCM context
   uint64_t orig_add_len = ctx->add_len * 8;
   size_t i;
 
+  if (tag_len > sizeof(work_buf)) return -1;
   if (tag_len != 0) memcpy(tag, ctx->base_ectr, tag_len);
 
   if (orig_len || orig_add_len) {
@@ -1060,10 +1062,9 @@ int gcm_crypt_and_tag(
                                     prepare the gcm context with the keying material, we simply
                                     invoke each of the three GCM sub-functions in turn...
                                  */
-  gcm_start(ctx, mode, iv, iv_len, add, add_len);
-  gcm_update(ctx, length, input, output);
-  gcm_finish(ctx, tag, tag_len);
-  return (0);
+  if (gcm_start(ctx, mode, iv, iv_len, add, add_len) != 0) return -1;
+  if (gcm_update(ctx, length, input, output) != 0) return -1;
+  return gcm_finish(ctx, tag, tag_len);
 }
 
 /******************************************************************************
@@ -1115,8 +1116,6 @@ int mg_aes_gcm_decrypt(unsigned char *output, const unsigned char *input,
   int ret = 0;      // our return value
   gcm_context ctx;  // includes the AES context structure
   unsigned char computed_tag[16];
-  size_t i;
-  int diff = 0;
 
   if (tag_len > sizeof(computed_tag)) return -1;
 
@@ -1127,9 +1126,7 @@ int mg_aes_gcm_decrypt(unsigned char *output, const unsigned char *input,
 
   gcm_zero_ctx(&ctx);
 
-  // compare tags
-  for (i = 0; i < tag_len; i++) diff |= computed_tag[i] ^ tag[i];
-  if (diff != 0) ret = -1;
+  if (!mg_memeq(computed_tag, tag, tag_len)) ret = -1;
 
   return (ret);
 }

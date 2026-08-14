@@ -9,6 +9,30 @@ void mg_bzero(volatile unsigned char *buf, size_t len) {
   }
 }
 
+uint64_t mg_timegm(unsigned int year, unsigned int month, unsigned int day,
+                   unsigned int hour, unsigned int min, unsigned int sec) {
+  static const uint16_t dm[12] = {0,   31,  59,  90,  120, 151,
+                                  181, 212, 243, 273, 304, 334};
+  const uint64_t day_secs = 86400;
+  const uint64_t year_secs = 31536000;
+  unsigned int y, ly;
+  if (year < 1970) return 0;
+  y = year - 1900;
+  ly = month > 2 ? y + 1 : y;
+  return (uint64_t) sec + 60 * min + 3600 * hour +
+         day_secs * (dm[month - 1] + day - 1) + year_secs * (y - 70) +
+         day_secs * ((ly - 69) / 4) - day_secs * ((ly - 1) / 100) +
+         day_secs * ((ly + 299) / 400);
+}
+
+bool mg_memeq(const void *a, const void *b, size_t n) {
+  const uint8_t *p = (const uint8_t *) a, *q = (const uint8_t *) b;
+  uint8_t r = 0;
+  size_t i;
+  for (i = 0; i < n; i++) r = (uint8_t) (r | (uint8_t) (p[i] ^ q[i]));
+  return r == 0;
+}
+
 #if MG_ENABLE_CUSTOM_RANDOM
 #else
 bool mg_random(void *buf, size_t len) {
@@ -104,6 +128,20 @@ uint32_t mg_crc32(uint32_t crc, const char *buf, size_t len) {
   return ~crc;
 }
 
+uint16_t mg_crc16(uint16_t crc, const char *buf, size_t len) {
+  static const uint16_t crclut[16] = {
+      // table for polynomial 0x8408 (reflected)
+      0x0000, 0x1081, 0x2102, 0x3183, 0x4204, 0x5285, 0x6306, 0x7387,
+      0x8408, 0x9489, 0xA50A, 0xB58B, 0xC60C, 0xD68D, 0xE70E, 0xF78F};
+  unsigned int c = (unsigned int) ~crc & 0xffff;
+  while (len--) {
+    uint8_t b = *(uint8_t *) buf++;
+    c = crclut[(c ^ b) & 0x0F] ^ (c >> 4);
+    c = crclut[(c ^ (b >> 4)) & 0x0F] ^ (c >> 4);
+  }
+  return (uint16_t) ~c;
+}
+
 static int isbyte(int n) {
   return n >= 0 && n <= 255;
 }
@@ -143,13 +181,16 @@ int mg_check_ip_acl(struct mg_str acl, struct mg_addr *remote_ip) {
 bool mg_path_is_sane(const struct mg_str path) {
   const char *s = path.buf;
   size_t n = path.len;
-  if (path.buf[0] == '~') return false;                        // Starts with ~
-  if (path.buf[0] == '.' && path.buf[1] == '.') return false;  // Starts with ..
-  for (; s[0] != '\0' && n > 0; s++, n--) {
-    if ((s[0] == '/' || s[0] == '\\') && n >= 2) {   // Subdir?
-      if (s[1] == '.' && s[2] == '.') return false;  // Starts with ..
-    }
+  if (n == 0 || path.buf[0] == '\0') return true;
+  if (s[0] == '~') return false;  // Starts with ~
+  if (s[0] == '.' && n > 1 && s[1] == '.')
+    return false;  // Starts with ..
+  for (; n > 0 && s[0] != '\0'; s++, n--) {
+    if ((s[0] == '/' || s[0] == '\\') && n >= 2 && s[1] == '.' && n > 2 &&
+        s[2] == '.')
+      return false;  // Subdir starts with ..
   }
+  if (n > 0) return false;  // embedded nul (terminator not counted in len)
   return true;
 }
 
